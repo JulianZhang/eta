@@ -1,7 +1,6 @@
 module ETA.CodeGen.Utils where
 
 import ETA.Main.DynFlags
--- import ETA.Types.Type
 import ETA.BasicTypes.Name
 import ETA.Types.TyCon
 import ETA.BasicTypes.Literal
@@ -11,9 +10,10 @@ import Control.Arrow(first)
 import ETA.CodeGen.Name
 import ETA.CodeGen.Rts
 import ETA.Debug
--- import Data.Text (Text)
+import Data.Text (Text)
 import Data.Text.Encoding (decodeUtf8)
-import Data.Monoid ((<>))
+import Data.Monoid
+import Data.Foldable
 
 cgLit :: Literal -> (FieldType, Code)
 cgLit (MachChar c)          = (jint, iconst jint . fromIntegral $ ord c)
@@ -25,7 +25,8 @@ cgLit (MachWord64 i)        = (jlong, lconst $ fromIntegral i)
 cgLit (MachFloat r)         = (jfloat, fconst $ fromRational r)
 cgLit (MachDouble r)        = (jdouble, dconst $ fromRational r)
 -- TODO: Remove this literal variant?
-cgLit MachNullAddr          = (jobject, nullAddr)
+cgLit MachNullAddr          = (jobject, lconst 0)
+cgLit MachNull              = (jobject, aconst_null jobject)
 cgLit (MachStr s)           = (jstring, sconst $ decodeUtf8 s)
 -- TODO: Implement MachLabel
 cgLit MachLabel {}          = error "cgLit: MachLabel"
@@ -52,13 +53,24 @@ litSwitch ft expr branches deflt
   where intBranches = map (first litToInt) branches
 
 tagToClosure :: DynFlags -> TyCon -> Code -> (FieldType, Code)
-tagToClosure dflags tyCon loadArg = (elemFt, enumCode)
+tagToClosure dflags tyCon loadArg = (closureType, enumCode)
   where enumCode =  invokestatic (mkMethodRef modClass fieldName [] (Just arrayFt))
                  <> loadArg
-                 <> gaload elemFt
+                 <> gaload closureType
         tyName = tyConName tyCon
         modClass = moduleJavaClass $ nameModule tyName
         fieldName = nameTypeTable dflags $ tyConName tyCon
-        tyConCl = tyConClass dflags tyCon
-        elemFt = obj tyConCl
-        arrayFt = jarray elemFt
+        arrayFt = jarray closureType
+
+initCodeTemplate' :: FieldType -> Bool -> Text -> Text -> FieldRef -> Code -> MethodDef
+initCodeTemplate' retFt synchronized modClass qClName field code =
+  mkMethodDef modClass accessFlags qClName [] (Just retFt) $ fold
+    [ getstatic field
+    , ifnonnull mempty code
+    , getstatic field
+    , greturn retFt ]
+  where accessFlags = [Public, Static] ++ (if synchronized then [Synchronized] else [])
+
+initCodeTemplate :: Bool -> Text -> Text -> FieldRef -> Code -> MethodDef
+initCodeTemplate synchronized modClass qClName field code =
+  initCodeTemplate' closureType synchronized modClass qClName field code

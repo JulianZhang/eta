@@ -3,57 +3,51 @@ package eta.runtime.message;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
-import eta.runtime.stg.StgTSO;
+import eta.runtime.stg.TSO;
 import eta.runtime.stg.Capability;
-import eta.runtime.stg.StgClosure;
+import eta.runtime.stg.Closure;
+import eta.runtime.exception.Exception;
+import static eta.runtime.stg.TSO.WhyBlocked.*;
 import static eta.runtime.concurrent.Concurrent.SPIN_COUNT;
 
 public class MessageThrowTo extends Message {
     public static AtomicLong maxMessageId = new AtomicLong(0);
+    public static long nextMessageId() {
+        return maxMessageId.getAndIncrement();
+    }
     public final long id = nextMessageId();
-    public final StgTSO source;
-    public final StgTSO target;
-    public final  StgClosure exception;
+    public final TSO source;
+    public final TSO target;
+    public final  Closure exception;
     public volatile AtomicBoolean lock = new AtomicBoolean(false);
 
-    public MessageThrowTo(final StgTSO source, final StgTSO target, final StgClosure exception) {
+    public MessageThrowTo(final TSO source, final TSO target, final Closure exception) {
         this.source = source;
         this.target = target;
         this.exception = exception;
     }
 
     @Override
-    public final void execute(Capability cap) {
+    public void execute(Capability cap) {
+        if (!isValid()) return;
         lock();
-        if (!isValid()) {
+        assert source.whyBlocked == BlockedOnMsgThrowTo;
+        assert source.blockInfo  == this;
+        boolean success = Exception.throwToMsg(cap, this, true);
+        if (!success) {
             unlock();
-        } else {
-            boolean success = cap.throwToMsg(this);
-            if (success) {
-                StgTSO source = this.source;
-                done();
-                cap.tryWakeupThread(source);
-            } else {
-                unlock();
-            }
         }
     }
 
     public void done() {
         invalidate();
-        /* TODO: Maybe we should set the Object members to null? */
         unlock();
     }
 
+    /** Locking Mechanisms **/
+
     public final void lock() {
-        do {
-            int i = 0;
-            do {
-                boolean old = lock.getAndSet(true);
-                if (!old) return;
-            } while (++i < SPIN_COUNT);
-            Thread.yield();
-        } while (true);
+        while (!lock.compareAndSet(false, true)) {}
     }
 
     public final void unlock() {
@@ -66,10 +60,10 @@ public class MessageThrowTo extends Message {
     }
 
     public final boolean tryLock() {
-        return lock.getAndSet(true);
+        return lock.compareAndSet(false, true);
     }
 
-    public long nextMessageId() {
-        return maxMessageId.getAndIncrement();
+    public final boolean tryUnlock() {
+        return lock.compareAndSet(true, false);
     }
 }

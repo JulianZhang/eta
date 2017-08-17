@@ -1,25 +1,29 @@
 package eta.runtime.stg;
 
-import java.util.ListIterator;
+import eta.runtime.thunk.Thunk;
+import eta.runtime.thunk.UpdateInfo;
 
 public class StgContext {
-    public ArgumentStack argStack = new ArgumentStack();
-    public StgTSO currentTSO;
     public Capability myCapability;
-    public ReturnCode ret;
+    public TSO currentTSO;
+    public ArgumentStack argStack = new ArgumentStack();
 
-    /* Used for ContinuationFrames */
-    public int target;
-    public ArgumentStack localsStack;
-
-    public void reset(Capability cap, StgTSO t) {
+    public void reset(Capability cap, TSO t) {
         myCapability = cap;
         currentTSO = t;
         argStack = new ArgumentStack();
     }
 
-    public void pushFrame(StackFrame frame) {
-        currentTSO.spPush(frame);
+    public void saveStackTrace(Exception e, StackTraceElement[] ste) {
+        currentTSO.saveStack(e, ste);
+    }
+
+    public UpdateInfo pushUpdate(Thunk updatee) {
+        return currentTSO.updateInfoStack.push(updatee);
+    }
+
+    public Thunk popUpdate() {
+        return currentTSO.updateInfoStack.pop();
     }
 
     public void merge(AbstractArgumentStack argStack) {
@@ -31,69 +35,29 @@ public class StgContext {
         this.argStack = (ArgumentStack) stack;
     }
 
+    public static StgContext acquire() {
+        Capability cap = Capability.getLocal();
+        StgContext context = cap.context;
+        if (context.currentTSO != null) {
+            return context;
+        } else {
+            context.currentTSO = new TSO(null);
+            return context;
+        }
+    }
+
     public void dump() {
         System.out.println("Context Dump");
         System.out.println("currentTSO: " + currentTSO);
         System.out.println("myCapabilitymyCapability: " + myCapability);
-        System.out.println("ret: " + ret);
         argStack.dump();
-        currentTSO.dump();
     }
 
-    public StackFrame stackTop() {
-        ListIterator<StackFrame> sp = currentTSO.sp;
-        StackFrame prevFrame = sp.previous();
-        sp.next();
-        return prevFrame;
-    }
-
-    public int stackTopIndex() {
-        return currentTSO.sp.previousIndex();
-    }
-
-    /* Returns false, if execution should proceed with the continuation.
-       Returns true,  if the continuation should terminate
-                       ( either because of an exception
-                       , or because of a context switch )
-     */
-    public boolean checkForStackFrames(int stackIndex, StackFrame frame) {
-        ListIterator<StackFrame> sp = currentTSO.sp;
-        do {
-            /* NOTE: This code bears a strong resemblance to
-                     StackFrame.enter() and so the logic should stay consistent. */
-            /* Grab the current index */
-            int index = sp.previousIndex();
-
-            /* If frames were added, shift the pointer to 'stackIndex' */
-            while (stackIndex < index) {
-                sp.previous();
-                index--;
-            }
-
-            StackFrame thisFrame = sp.previous();
-            sp.next();
-            if (thisFrame == frame) {
-                /* If the stack hasn't changed on us */
-                if (sp.hasNext()) {
-                    /* If frames were added, enter them */
-                    sp.next().enter(this);
-                } else {
-                    /* Otherwise, return to the continuation */
-                    return false;
-                }
-            } else  {
-                /* If frames were removed, pop down the call stack */
-                return true;
-            }
-
-        } while (true);
-    }
-
-    public StgClosure R(int index) {
+    public Closure R(int index) {
         return argStack.R(index);
     }
 
-    public void R(int index, StgClosure closure) {
+    public void R(int index, Closure closure) {
         argStack.R(index, closure);
     }
 
@@ -135,13 +99,5 @@ public class StgContext {
 
     public void D(int index, double closure) {
         argStack.D(index, closure);
-    }
-
-    public enum ReturnCode {
-        HeapOverflow,
-        StackOverflow,
-        ThreadYielding,
-        ThreadBlocked,
-        ThreadFinished
     }
 }

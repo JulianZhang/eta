@@ -13,6 +13,7 @@ module ETA.CodeGen.Types
    SelfLoopInfo,
    CgBindings,
    RecIndexes,
+   RecInfo,
    storeDefault,
    locArgRep,
    mkRepLocDirect,
@@ -32,13 +33,13 @@ module ETA.CodeGen.Types
    nonVoidIds,
    getJavaInfo,
    getNonVoids,
-   getLocField,
    isLFThunk,
    lfFieldType,
    lfStaticThunk)
 where
 
 import ETA.BasicTypes.Id
+import ETA.BasicTypes.BasicTypes
 import ETA.BasicTypes.VarEnv
 import ETA.BasicTypes.DataCon
 import ETA.Types.TyCon
@@ -52,6 +53,7 @@ import ETA.Debug
 import ETA.Util
 import Data.Maybe
 import Data.Text (Text)
+import qualified Data.Text as T
 import Data.Monoid ((<>))
 
 type SelfLoopInfo = (Id, Label, [CgLoc])
@@ -64,14 +66,20 @@ data CgLoc = LocLocal Bool FieldType !Int
            | LocStatic FieldType Text Text
            | LocField Bool FieldType Text Text
            | LocDirect Bool FieldType Code
-           | LocLne Label [CgLoc]
+           | LocLne Label Int CgLoc [CgLoc]
 
 instance Outputable CgLoc where
-  ppr (LocLocal isClosure _ int) = str "local: " <+> ppr int <+> ppr isClosure
-  ppr LocStatic {} = str "static"
-  ppr LocField {} = str "field"
-  ppr LocDirect {} = str "direct"
-  ppr LocLne {} = str "lne"
+  ppr (LocLocal isClosure ft int)
+    = str "local:" <+> ppr isClosure <+> str (show ft) <+> ppr int
+  ppr (LocStatic ft mod cls)
+    = str "static:" <+> str (show ft) <+> str (T.unpack mod) <+> str (T.unpack cls)
+  ppr (LocField isClosure ft mod cls)
+    = str "field:" <+> ppr isClosure
+    <+> str (show ft) <+> str (T.unpack mod) <+> str (T.unpack cls)
+  ppr (LocDirect isClosure ft _) = str "direct:" <+> ppr isClosure <+> str (show ft)
+  ppr (LocLne (Label l) target cgLoc cgLocs)
+    = str "lne: label:" <+> ppr l <+> str "target:" <+> ppr target <+>
+      str "targetLoc:" <+> ppr cgLoc <+> str "argLocs:" <+> hcat (map ppr cgLocs)
 
 mkLocDirect :: Bool -> (FieldType, Code) -> CgLoc
 mkLocDirect isClosure (ft, code) = LocDirect isClosure ft code
@@ -87,10 +95,10 @@ mkRepLocDirect (rep, code) = LocDirect isClosure ft code
 locArgRep :: CgLoc -> ArgRep
 locArgRep loc = case loc of
   LocLocal isClosure ft _ -> locRep isClosure ft
-  LocStatic _ _ _ -> P
+  LocStatic {} -> P
   LocField isClosure ft _ _ -> locRep isClosure ft
   LocDirect isClosure ft _ -> locRep isClosure ft
-  LocLne _ _ -> panic "logArgRep: Cannot pass a let-no-escape binding!"
+  LocLne {} -> panic "logArgRep: Cannot pass a let-no-escape binding!"
   where locRep isClosure ft = if isClosure then P else ftArgRep ft
 
 locFt :: CgLoc -> FieldType
@@ -98,11 +106,11 @@ locFt (LocLocal _ ft _) = ft
 locFt (LocStatic ft _ _) = ft
 locFt (LocField _ ft _ _) = ft
 locFt (LocDirect _ ft _) = ft
-locFt _ = error $ "locFt: bad CgLoc"
+locFt loc = pprPanic "locFt" $ ppr loc
 
 storeLoc :: CgLoc -> Code -> Code
 storeLoc (LocLocal _ ft n) code = code <> gstore ft n
-storeLoc _ _ = error $ "storeLoc: bad storeLoc"
+storeLoc loc _ = pprPanic "storeLoc" $ ppr loc
 
 storeDefault :: CgLoc -> Code
 storeDefault cgLoc = storeLoc cgLoc $ defaultValue (locFt cgLoc)
@@ -115,7 +123,7 @@ loadLoc (LocField _ ft clClass fieldName) =
      gload (obj clClass) 0
   <> getfield (mkFieldRef clClass fieldName ft)
 loadLoc (LocDirect _ _ code) = code
-loadLoc _ = error $ "loadLoc: bad loadLoc"
+loadLoc loc = pprPanic "loadLoc" $ ppr loc
 
 type CgBindings = IdEnv CgIdInfo
 
@@ -129,7 +137,7 @@ instance Outputable CgIdInfo where
 
 splitStaticLoc :: CgLoc -> (Text, Text)
 splitStaticLoc (LocStatic _ modClass clName) = (modClass, clName)
-splitStaticLoc _ = error $ "splitStaticLoc: Not LocStatic"
+splitStaticLoc loc = pprPanic "splitStaticLoc" $ ppr loc
 
 getJavaInfo :: DynFlags -> CgIdInfo -> (Text, Text, Text)
 getJavaInfo dflags CgIdInfo { cgLocation, cgLambdaForm }
@@ -267,28 +275,6 @@ unsafeStripNV (NonVoid a) = a
 nonVoidIds :: [Id] -> [NonVoid Id]
 nonVoidIds ids = [NonVoid id | id <- ids, not (isVoidRep (idPrimRep id))]
 
-data TopLevelFlag
-  = TopLevel
-  | NotTopLevel
-
-isTopLevel :: TopLevelFlag -> Bool
-isTopLevel TopLevel = True
-isTopLevel _ = False
-
-type RepArity = Int
-
-data RecFlag = Recursive
-             | NonRecursive
-             deriving Eq
-
-isRec :: RecFlag -> Bool
-isRec Recursive    = True
-isRec NonRecursive = False
-
-isNonRec :: RecFlag -> Bool
-isNonRec Recursive    = False
-isNonRec NonRecursive = True
-
 getNonVoids :: [(Maybe FieldType, a)] -> [NonVoid a]
 getNonVoids = mapMaybe (\(mft, val) -> case mft of
                            Just _ -> Just (NonVoid val)
@@ -299,26 +285,17 @@ getNonVoidFts = mapMaybe (\(mft, val) -> case mft of
                            Just ft -> Just (ft, NonVoid val)
                            Nothing -> Nothing)
 
-getLocField :: CgLoc -> Maybe FieldRef
-getLocField (LocStatic ft modClass clName) =
-  Just $ mkFieldRef modClass (closure clName) ft
-getLocField (LocField _ ft clClass fieldName) =
-  Just $ mkFieldRef clClass fieldName ft
-getLocField _ =
-  Nothing
-
 enterMethod :: CgLoc -> Code
 enterMethod cgLoc
   = loadLoc cgLoc
  <> loadContext
- -- TODO: Do better than stgClosure
- <> invokevirtual (mkMethodRef stgClosure "enter" [contextType] void)
+ <> invokevirtual (mkMethodRef stgClosure "enter" [contextType] (ret closureType))
 
 evaluateMethod :: CgLoc -> Code
 evaluateMethod cgLoc
   = loadLoc cgLoc
  <> loadContext
- <> invokevirtual (mkMethodRef stgClosure "evaluate" [contextType] void)
- -- TODO: Narrrow the invokevirtual call with locFt
+ <> invokevirtual (mkMethodRef stgClosure "evaluate" [contextType] (ret closureType))
 
 type RecIndexes = [(Int, Id)]
+type RecInfo = (Text, Text, Text, FieldRef, Code, RecIndexes)

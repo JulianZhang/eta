@@ -1,8 +1,9 @@
-{-# GHC_OPTIONS -XNoOverloadedStrings #-}
+{-# OPTIONS_GHC -XNoOverloadedStrings #-}
+{-# LANGUAGE LambdaCase #-}
 import Development.Shake
-import Development.Shake.Command
+-- import Development.Shake.Command
 import Development.Shake.FilePath
-import Development.Shake.Util
+-- import Development.Shake.Util
 
 import Distribution.InstalledPackageInfo
 import Distribution.ParseUtils
@@ -12,7 +13,7 @@ import Control.Monad
 import Data.List
 import System.Console.GetOpt
 import System.Directory (createDirectoryIfMissing, getAppUserDataDirectory,
-                         createDirectory, removeDirectory, findExecutable)
+                         createDirectory)
 
 -- * Standard file/directory paths
 rtsDir, libraryDir, rtsBuildDir, rtsSrcDir, rtsjar :: FilePath
@@ -32,12 +33,31 @@ libCustomBuildDir lib = libraryDir </> lib </> "build"
 libName lib = "HS" ++ lib ++ ".jar"
 libJarPath lib = libCustomBuildDir lib </> libName lib
 
-getEtlasDir, getEtaRoot :: Action FilePath
+getEtlasDir, getEtaRoot, getEtlasLibDir :: Action FilePath
 getEtlasDir = liftIO $ getAppUserDataDirectory "etlas"
-getEtaRoot  = liftIO $ getAppUserDataDirectory "eta"
+getEtaRoot  = do
+  Stdout actualOutput <- cmd "eta" "--print-libdir"
+  return . head $ lines actualOutput
+getEtlasLibDir = do
+  etlasDir <- getEtlasDir
+  etaVersion <- getEtaNumericVersion
+  let etlasLibDir = etlasDir </> "lib"
+      etaWithVersion = "eta-" ++ etaVersion
+  findFileOrDir etaWithVersion etlasLibDir
+
+findFileOrDir :: String -> FilePath -> Action FilePath
+findFileOrDir pat dir = do
+  results <- getDirectoryContents dir
+  case filter (pat `isInfixOf`) results of
+    (found:_) -> return (dir </> found)
+    _         -> fail $ "Pattern not found '" ++ pat ++ "' in " ++ dir
+
+getEtaNumericVersion :: Action String
+getEtaNumericVersion = do
+  Stdout actualOutput <- cmd "eta" "--numeric-version"
+  return . head $ lines actualOutput
 
 -- * Utility functions for filepath handling in the Action monad
-
 createDirIfMissing :: FilePath -> Action ()
 createDirIfMissing = liftIO . createDirectoryIfMissing True
 
@@ -45,7 +65,6 @@ createDir :: FilePath -> Action ()
 createDir path = liftIO $ createDirectoryIfMissing True path
 
 -- * Dependency Handling
-
 -- TODO: Read the .cabal files for dependencies?
 getDependencies :: String -> [String]
 getDependencies "ghc-prim" = ["rts"]
@@ -71,10 +90,16 @@ topologicalDepsSort xs deps = sort' xs []
 getLibs :: Action [String]
 getLibs = fmap (\\ ignoreList) $ getDirectoryDirs libraryDir
 
-buildLibrary :: Bool -> String -> [String] -> Action ()
-buildLibrary debug lib _deps = do
+nonNullString :: String -> [String]
+nonNullString str
+  | null str = []
+  | otherwise = [str]
+
+buildLibrary :: Bool -> (String -> String) -> String -> [String] -> Action ()
+buildLibrary debug binPathArg lib _deps = do
   let dir = library lib
       installFlags = ["--allow-boot-library-installs"]
+                  ++ nonNullString (binPathArg "../../")
       configureFlags = if debug
                        then ["--enable-optimization=0"
                             ,"--eta-options=-ddump-to-file -ddump-stg -dumpdir=dump"]
@@ -143,8 +168,16 @@ testSpec specPath = do
 
 -- * Command line flags
 
-flags :: [OptDescr (Either a Bool)]
-flags = [Option "" ["debuginfo"] (NoArg $ Right True) "Run with debugging information."]
+data BuildFlags = BuildDebugInfo
+                | BuildBinaries { binFilePath :: FilePath }
+                deriving Eq
+
+flags :: [OptDescr (Either String BuildFlags)]
+flags =
+  [
+    Option "" ["debuginfo"] (NoArg $ Right $ BuildDebugInfo) "Run with debugging information."
+  , Option "" ["binaries"]  (ReqArg (Right . BuildBinaries) "DIR") "Build binaries for the base libraries"
+  ]
 
 -- * The main build script
 main :: IO ()
@@ -154,9 +187,16 @@ main = shakeArgsWith shakeOptions{shakeFiles=rtsBuildDir} flags $ \flags' target
       then want [rtsjar]
       else want targets
 
-    let debug = case flags' of
-                  _:_ -> True
-                  _   -> False
+    let debug = BuildDebugInfo `elem` flags'
+        binaryOutputPath = fmap binFilePath
+                         $ find (\case
+                                    BuildBinaries _ -> True
+                                    _ -> False)
+                         $ reverse flags'
+        binPathArg s = maybe "" (\p -> "--binaries-output-dir="
+                                    ++ (if isRelative p then s else "")
+                                    ++ p)
+                       binaryOutputPath
 
     phony "install" $ do
       rootDir <- getEtaRoot
@@ -170,29 +210,23 @@ main = shakeArgsWith shakeOptions{shakeFiles=rtsBuildDir} flags $ \flags' target
         unit $ cmd ["eta-pkg","init",packageConfDir rootDir]
         unit $ cmd "etlas update"
         etlasDir <- getEtlasDir
-        copyFile' "utils/coursier/coursier" $ etlasDir </> "coursier"
+        let etlasToolsDir = etlasDir </> "tools"
+        createDirIfMissing etlasToolsDir
+        copyFile' "utils/coursier/coursier" $ etlasToolsDir </> "coursier"
         let verifyExt ext = "utils/class-verifier/Verify" <.> ext
         unit $ cmd ["javac", verifyExt "java"]
-        copyFile' (verifyExt "class") $ etlasDir </> "Verify.class"
+        createDirIfMissing (etlasToolsDir </> "classes")
+        copyFile' (verifyExt "class") $ etlasToolsDir </> "classes" </> "Verify.class"
         libs <- getLibs
         let sortedLibs = topologicalDepsSort libs getDependencies
         forM_ sortedLibs $ \lib ->
-          buildLibrary debug lib (getDependencies lib)
-        unit $ cmd ["etlas", "install", "template-haskell", "--allow-boot-library-installs"]
+          buildLibrary debug binPathArg lib (getDependencies lib)
+        unit $ cmd $ ["etlas", "install", "template-haskell-2.11.1.0", "--allow-boot-library-installs"] ++ nonNullString (binPathArg "")
 
     phony "rts-clean" $ do
       liftIO $ removeFiles (libCustomBuildDir "rts") ["//*"]
       need [rtsjar]
-      let libDir = libraryDir </> "rts"
-      unit $ cmd (Cwd libDir) "etlas clean"
-      unit $ cmd (Cwd libDir) "etlas build"
-      etlasDir <- getEtlasDir
-      let etlasLibDir = etlasDir </> "lib"
-      -- @VERSION_CHANGE@
-      etlasLibDir' <- fmap (head . filter ("eta-0.0.6" `isInfixOf`))
-                   $ getDirectoryContents etlasLibDir
-      copyFile' (libDir </> "dist" </> "build" </> "HSrts-0.1.0.0.jar")
-                (etlasLibDir </> etlasLibDir' </> "rts-0.1.0.0" </> "HSrts-0.1.0.0.jar")
+      buildLibrary debug binPathArg "rts" (getDependencies "rts")
 
     phony "test" $ do
       specs <- getDirectoryFiles "" ["//*.spec"]
@@ -204,7 +238,8 @@ main = shakeArgsWith shakeOptions{shakeFiles=rtsBuildDir} flags $ \flags' target
 
     phony "uninstall" $ do
       rootDir <- getEtaRoot
-      putNormal "Cleaning files in ~/.eta"
+      createDirIfMissing rootDir
+      putNormal $ "Cleaning files in " ++ rootDir
       removeFilesAfter rootDir ["//*"]
 
     phony "reinstall" $ do
@@ -217,13 +252,13 @@ main = shakeArgsWith shakeOptions{shakeFiles=rtsBuildDir} flags $ \flags' target
       libs <- getLibs
       forM_ libs $ \lib -> do
         let libDir = libraryDir </> lib
-        unit $ cmd (Cwd libDir) "etlas clean"
+        unit $ cmd (Cwd libDir) (Stdin "n") "etlas clean"
 
     rtsjar %> \out -> do
       createDirIfMissing rtsBuildDir
       cs <- getDirectoryFiles rtsSrcDir ["//*.java"]
       -- TODO: Setup a debug build
-      let javacFlags = if debug then ["-g"] else []
+      let javacFlags = (if debug then ["-g"] else []) ++ ["-Xlint:unchecked"]
       unit $ cmd (Cwd rtsSrcDir) "javac" "-XDignore.symbol.file" javacFlags "-d" (top rtsBuildDir) cs
       classfiles <- getDirectoryFiles rtsBuildDir ["//*.class"]
       unit $ cmd (Cwd rtsBuildDir) "jar cf" (top out) classfiles

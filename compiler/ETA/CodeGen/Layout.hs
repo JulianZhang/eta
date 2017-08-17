@@ -15,17 +15,16 @@ import ETA.CodeGen.Rts
 import ETA.CodeGen.Env
 
 
-import Data.Maybe (mapMaybe)
-import Data.Monoid ((<>))
-import Data.Text (Text)
-import Data.Foldable (fold)
+import Data.Maybe
+import Data.Monoid
+import Data.Foldable
 
 emitReturn :: [CgLoc] -> CodeGen ()
 emitReturn results = do
   sequel <- getSequel
   emit $
     case sequel of
-      Return         -> mkReturnExit results
+      Return         -> mkReturnExit results <> greturn closureType
       AssignTo slots -> multiAssign slots (map loadLoc results)
 
 emitAssign :: CgLoc -> Code -> CodeGen ()
@@ -36,23 +35,12 @@ emitAssign cgLoc code = emit $ storeLoc cgLoc code
 --       algorithm a la GHC
 multiAssign :: [CgLoc] -> [Code] -> Code
 multiAssign locs codes = fold $ zipWith storeLoc locs codes
--- multiAssign [] []       = mempty
--- multiAssign [loc] [rhs] = storeLoc loc rhs
--- multiAssign _ _         = error "multiAssign for more than one location"
 
--- TODO: Beautify this code
 -- TODO: There are a lot of bangs in this function. Verify that they do
 --       indeed help.
-mkCallEntry :: Int -> [NonVoid Id] -> ([(NonVoid Id, CgLoc)], Code, Int)
-mkCallEntry nStart nvArgs = (zip nvArgs locs, code, n)
-  where fts' = map ( expectJust "mkCallEntry"
-                   . repFieldType_maybe
-                   . idType ) args'
-        args' = map unsafeStripNV nvArgs
-        argReps' = map idArgRep args'
-        (!code, !locs, !n) = loadArgs nStart mempty [] args' fts' argReps' 2 1 1 1 1 1
-        loadArgs !n !code !locs (_arg:args) (ft:fts) (argRep:argReps)
-                 !r !i !l !f !d !o =
+mkCallEntry :: [CgLoc] -> Code
+mkCallEntry cgLocs = go mempty cgLocs 2 1 1 1 1 1
+  where go !code (cgLoc:cgLocs) !r !i !l !f !d !o =
           case argRep of
             P -> loadRec (context r) (r + 1) i l f d o
             N -> loadRec (context i <> gconv jint ft) r (i + 1) l f d o
@@ -61,18 +49,16 @@ mkCallEntry nStart nvArgs = (zip nvArgs locs, code, n)
             D -> loadRec (context d) r i l f (d + 1) o
             O -> loadRec (context o <> gconv jobject ft) r i l f d (o + 1)
             _ -> error "contextLoad: V"
-          where context = contextLoad ft argRep
-                loadRec nextCode =
-                  loadArgs (n + ftSize) (code <> nextCode <> gstore ft n)
-                           (loc:locs) args fts argReps
-                ftSize = fieldSize ft
-                loc = LocLocal (argRep == P) ft n
-        loadArgs !n !code !locs _ _ _ _ _ _ _ _ _ = (code, reverse locs, n)
+          where context = contextLoad argRep
+                argRep  = locArgRep cgLoc
+                ft      = locFt cgLoc
+                loadRec nextCode = go (code <> storeLoc cgLoc nextCode) cgLocs
+        go !code _ _ _ _ _ _ _ = code
 
 mkCallExit :: Bool -> [(ArgRep, Maybe FieldType, Maybe Code)] -> Code
 mkCallExit slow args' = storeArgs mempty args' rStart 1 1 1 1 1
   where rStart = if slow then 1 else 2
-        storeArgs !code ((argRep, ft', code'):args) !r !i !l !f !d !o =
+        storeArgs !code ((argRep, _ft', code'):args) !r !i !l !f !d !o =
           case argRep of
             P -> storeRec (context r) (r + 1) i l f d o
             N -> storeRec (context i) r (i + 1) l f d o
@@ -81,16 +67,28 @@ mkCallExit slow args' = storeArgs mempty args' rStart 1 1 1 1 1
             D -> storeRec (context d) r i l f (d + 1) o
             O -> storeRec (context o) r i l f d (o + 1)
             V -> storeArgs code args r i l f d o
-          where ft = expectJust "mkCallExit:ft" ft'
-                loadCode = expectJust "mkCallExit:loadCode" code'
-                context = contextStore ft argRep loadCode
+          where loadCode = expectJust "mkCallExit:loadCode" code'
+                context = contextStore argRep loadCode
                 storeRec nextCode =
                   storeArgs (code <> nextCode) args
         storeArgs !code _ _ _ _ _ _ _ = code
 
+-- Helper function for generating return entry/exit layout
+findFirstR :: [CgLoc] -> (Maybe CgLoc, [CgLoc])
+findFirstR = go []
+  where go locs []              = (Nothing, reverse locs)
+        go locs (cgLoc:cgLocs)
+          | locArgRep cgLoc == P = (Just cgLoc, reverse locs ++ cgLocs)
+          | otherwise            = go (cgLoc:locs) cgLocs
+
+-- This method is extremely sensitive. It assumes that the returned closure is
+-- on the top of the stack
 mkReturnEntry :: [CgLoc] -> Code
-mkReturnEntry cgLocs' = loadVals mempty cgLocs' 1 1 1 1 1 1
-  where loadVals !code (cgLoc:cgLocs) !r !i !l !f !d !o =
+mkReturnEntry cgLocs' =
+     maybe (pop closureType) (flip storeLoc mempty) mR1
+  <> loadVals mempty cgLocs'' 2 1 1 1 1 1
+  where (mR1, cgLocs'') = findFirstR cgLocs'
+        loadVals !code (cgLoc:cgLocs) !r !i !l !f !d !o =
           case argRep of
             P -> loadRec (context r) (r + 1) i l f d o
             N -> loadRec (context i <> gconv jint ft) r (i + 1) l f d o
@@ -101,14 +99,18 @@ mkReturnEntry cgLocs' = loadVals mempty cgLocs' 1 1 1 1 1 1
             _ -> error "contextLoad: V"
           where ft = locFt cgLoc
                 argRep = locArgRep cgLoc
-                context = contextLoad ft argRep
+                context = contextLoad argRep
                 loadRec nextCode =
                   loadVals (code <> storeLoc cgLoc nextCode) cgLocs
         loadVals !code _ _ _ _ _ _ _ = code
 
+-- This method assumes that the bytecode after this code expects a closure at the
+-- top of the stack
 mkReturnExit :: [CgLoc] -> Code
-mkReturnExit cgLocs' = storeVals mempty cgLocs' 1 1 1 1 1 1
-  where storeVals !code (cgLoc:cgLocs) !r !i !l !f !d !o =
+mkReturnExit cgLocs' = storeVals mempty cgLocs'' 2 1 1 1 1 1
+                    <> maybe (aconst_null closureType) loadLoc mR1
+  where (mR1, cgLocs'') = findFirstR cgLocs'
+        storeVals !code (cgLoc:cgLocs) !r !i !l !f !d !o =
           case argRep of
             P -> storeRec (context r) (r + 1) i l f d o
             N -> storeRec (context i) r (i + 1) l f d o
@@ -117,70 +119,66 @@ mkReturnExit cgLocs' = storeVals mempty cgLocs' 1 1 1 1 1 1
             D -> storeRec (context d) r i l f (d + 1) o
             O -> storeRec (context o) r i l f d (o + 1)
             _ -> error "contextLoad: V"
-          where ft = locFt cgLoc
-                loadCode = loadLoc cgLoc
+          where loadCode = loadLoc cgLoc
                 argRep = locArgRep cgLoc
-                context = contextStore ft argRep loadCode
+                context = contextStore argRep loadCode
                 storeRec nextCode =
                   storeVals (code <> nextCode) cgLocs
         storeVals !code _ _ _ _ _ _ _ = code
 
-slowCall :: CgLoc -> [StgArg] -> CodeGen ()
-slowCall fun args = do
-  dflags <- getDynFlags
-  argFtCodes <- getRepFtCodes args
-  let (apPat, arity, _fts) = slowCallPattern $ map (\(a,_,_) -> a) argFtCodes
-      slowCode = directCall' True (mkApFast apPat) arity
-                             ((P, Just ft, Just code):argFtCodes)
-  if n > arity && optLevel dflags >= 2 then do
+slowCall :: DynFlags -> CgLoc -> [(ArgRep, Maybe FieldType, Maybe Code)] -> Code
+slowCall dflags fun argFtCodes
     -- TODO: Implement optimization
     --       effectively an evaluation test + fast call
-    emit slowCode
-  else
-    emit slowCode
-  where n = length args
-        ft = locFt fun
-        code = loadLoc fun
+  |  n > arity && optLevel dflags >= 2 = slowCode
+  | otherwise = slowCode
+  where n            = length argFtCodes
+        ft           = locFt fun
+        code         = loadLoc fun
+        (arity, fts) = slowCallPattern $ map (\(a,_,_) -> a) argFtCodes
+        slowCode     = directCall' True True (mkApFast arity (contextType:fts)) arity
+                                   ((P, Just ft, Just code):argFtCodes)
 
-directCall :: Bool -> Code -> RepArity -> [StgArg] -> CodeGen ()
-directCall slow entryCode arity args = do
-  argFtCodes <- getRepFtCodes args
-  emit $ directCall' slow entryCode arity argFtCodes
+directCall :: Bool -> Code -> RepArity -> [(ArgRep, Maybe FieldType, Maybe Code)] -> Code
+directCall slow entryCode arity argFtCodes =
+  directCall' slow False entryCode arity argFtCodes
 
-directCall' :: Bool -> Code -> RepArity -> [(ArgRep, Maybe FieldType, Maybe Code)] -> Code
-directCall' slow entryCode arity args =
-     stackLoadCode
-  <> mkCallExit slow callArgs
+directCall' :: Bool -> Bool -> Code -> RepArity -> [(ArgRep, Maybe FieldType, Maybe Code)] -> Code
+directCall' slow directLoad entryCode arity args =
+     node
+  <> loadArgs
   <> entryCode
+  <> applyCode
   where (callArgs, restArgs) = splitAt realArity args
-        realArity = if slow then arity + 1 else arity
-        stackFrames = slowArgFrames restArgs
-        stackFramesLoad = map (\code -> dup tsoType
-                                     <> code
-                                     <> spPushMethod)
-                          stackFrames
-        stackLoadCode = if null stackFrames then mempty
-                        else    loadContext
-                             <> currentTSOField
-                             <> fold stackFramesLoad
-                             <> pop tsoType
+        realArity
+          | slow      = arity + 1
+          | otherwise = arity
+        realCallArgs
+          | slow      = drop 1 callArgs
+          | otherwise = callArgs
+        third (_,_,a) = a
+        (node, loadArgs)
+          | directLoad = (fromMaybe mempty . third $ head callArgs,
+                          loadContext <> fold (catMaybes $ map third realCallArgs))
+          | otherwise  = (mempty, mkCallExit slow callArgs)
+        applyCalls = genApplyCalls restArgs
+        applyCode
+          | null applyCalls = mempty
+          | otherwise       = fold applyCalls
 
-slowArgFrames :: [(ArgRep, Maybe FieldType, Maybe Code)] -> [Code]
-slowArgFrames [] = []
-slowArgFrames args = thisFrame : slowArgFrames restArgs
-  where (argPat, n, fts) = slowCallPattern $ map (\(a,_,_) -> a) args
+genApplyCalls :: [(ArgRep, Maybe FieldType, Maybe Code)] -> [Code]
+genApplyCalls []   = []
+genApplyCalls args = applyCall : genApplyCalls restArgs
+  where (n, fts)     = slowCallPattern $ map (\(a,_,_) -> a) args
         (callArgs, restArgs) = splitAt n args
-        thisFrame = genSlowFrame argPat fts callArgs
+        applyCall            = genApplyCall n fts callArgs
 
-genSlowFrame :: Text -> [FieldType] -> [(ArgRep, Maybe FieldType, Maybe Code)] -> Code
-genSlowFrame patText fts args =
-     new ft
-  <> dup ft
+genApplyCall :: Int -> [FieldType] -> [(ArgRep, Maybe FieldType, Maybe Code)] -> Code
+genApplyCall arity fts args =
+     loadContext
   <> fold loadCodes
-  <> invokespecial (mkMethodRef patClass "<init>" fts void)
-  where patClass = apply $ argPatToFrame patText
-        loadCodes = mapMaybe (\(_, _, a) -> a) args
-        ft = obj patClass
+  <> mkApFast arity (contextType:fts)
+  where loadCodes = mapMaybe (\(_, _, a) -> a) args
 
 getRepFtCodes :: [StgArg] -> CodeGen [(ArgRep, Maybe FieldType, Maybe Code)]
 getRepFtCodes = mapM getFtAmode
@@ -208,26 +206,10 @@ getUnboxedResultReps resType = [ rep
           UbxTupleRep tys -> tys
           UnaryRep    ty  -> [ty]
 
-withContinuation :: CodeGen () -> CodeGen ()
-withContinuation call = do
+withContinuation :: Code -> CodeGen ()
+withContinuation code = do
   sequel <- getSequel
-  case sequel of
-    AssignTo cgLocs -> do
-      wrapStackCheck call
-      emit $ mkReturnEntry cgLocs
-    _               -> do
-      call
-      return ()
-
-wrapStackCheck :: CodeGen () -> CodeGen ()
-wrapStackCheck call = do
-    -- TODO: Replace the local variable with an internal variable in context?
-    --stackTop <- newTemp False frameType
-    emit $ loadContext <> spTopIndexMethod
-    emit $ loadContext <> spTopMethod
-    call
-    emit $ loadContext
-        <> dup_x2 jint frameType contextType
-        <> pop contextType
-        <> checkForStackFramesMethod
-        <> ifeq mempty vreturn
+  emit code
+  emit $ case sequel of
+           AssignTo cgLocs -> mkReturnEntry cgLocs
+           _               -> greturn closureType

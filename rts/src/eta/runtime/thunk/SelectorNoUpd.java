@@ -1,30 +1,23 @@
 package eta.runtime.thunk;
 
-import eta.runtime.stg.StgClosure;
+import eta.runtime.stg.Closure;
+import eta.runtime.stg.DataCon;
 import eta.runtime.stg.StgContext;
-import eta.runtime.stg.StackFrame;
-import eta.runtime.apply.Apply;
 
-public abstract class SelectorNoUpd extends StgThunk {
+public abstract class SelectorNoUpd extends Thunk {
     protected final int index;
-    protected final StgClosure p;
+    protected final Closure p;
 
-    public SelectorNoUpd(int i, StgClosure p) {
+    public SelectorNoUpd(int i, Closure p) {
         super();
         this.index = i;
         this.p = p;
     }
 
     @Override
-    public final void enter(StgContext context) {
-        super.enter(context);
-        int index = context.stackTopIndex();
-        StackFrame frame = context.stackTop();
-        p.evaluate(context);
-        if (!context.checkForStackFrames(index, frame)) {
-            selectEnter(context);
-        }
+    public final Closure thunkEnter(StgContext context) {
+        return selectEnter(context, (DataCon) p.evaluate(context));
     }
 
-    public abstract void selectEnter(StgContext context);
+    public abstract Closure selectEnter(StgContext context, DataCon result);
 }

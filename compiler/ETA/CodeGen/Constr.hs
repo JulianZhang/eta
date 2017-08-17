@@ -18,53 +18,52 @@ import ETA.CodeGen.Name
 import ETA.CodeGen.Rts
 import ETA.Util
 
-import Control.Monad(foldM)
+import Control.Monad hiding (void)
 import Codec.JVM
-import Data.Maybe (catMaybes, mapMaybe)
+import Data.Maybe
 
 import Data.Monoid ((<>))
 import Data.Foldable (fold)
 
 cgTopRhsCon :: DynFlags
             -> Id               -- Name of thing bound to this RHS
+            -> [Id]             -- Recursive ids
             -> DataCon          -- Id
             -> [StgArg]         -- Args
-            -> (CgIdInfo, CodeGen ())
-cgTopRhsCon dflags id dataCon args = (cgIdInfo, genCode)
-  where cgIdInfo = mkCgIdInfo dflags id lfInfo
-        lfInfo = mkConLFInfo dataCon
-        maybeFields = map repFieldType_maybe $ dataConRepArgTys dataCon
-        fields = catMaybes maybeFields
+            -> (CgIdInfo, CodeGen (Maybe RecInfo))
+cgTopRhsCon dflags id conRecIds dataCon args = (cgIdInfo, genCode)
+  where cgIdInfo                      = mkCgIdInfo dflags id lfInfo
+        lfInfo                        = mkConLFInfo dataCon
+        maybeFields                   = map repFieldType_maybe
+                                      $ dataConRepArgTys dataCon
+        fields                        = catMaybes maybeFields
         (modClass, clName, dataClass) = getJavaInfo dflags cgIdInfo
-        qClName = closure clName
-        dataFt = obj dataClass
-        -- typeFt = obj (tyConClass dflags (dataConTyCon dataCon))
-        genCode = do
-          loads <- mapM getArgLoadCode . getNonVoids $ zip maybeFields args
+        qClName                       = closure clName
+        dataFt                        = obj dataClass
+        genCode                       = do
+          let nvArgs = getNonVoids $ zip maybeFields args
+          recCodes <- forM (zip [1..] nvArgs) $ \(i, nvArg) ->
+                        case stgArgId (unsafeStripNV nvArg) of
+                          Just nvId | nvId `elem` conRecIds
+                            -> return (Just (i, nvId), aconst_null closureType)
+                          _ -> fmap (Nothing,) $ getArgLoadCode nvArg
+          let (mRecIndexes, loads) = unzip recCodes
+              recIndexes           = catMaybes mRecIndexes
+              field                = mkFieldRef modClass qClName closureType
+              loadCodes            = [ new dataFt
+                                     , dup dataFt
+                                     , fold loads
+                                     , invokespecial $
+                                         mkMethodRef dataClass "<init>" fields void ]
           defineField $ mkFieldDef [Private, Static] qClName closureType
-          let field = mkFieldRef modClass qClName closureType
-              loadCodes =
-                [
-                  new dataFt
-                , dup dataFt
-                , fold loads
-                , invokespecial (mkMethodRef dataClass "<init>" fields void)
-                , putstatic field
-                ]
-          defineMethod . mkMethodDef modClass [Public, Static] qClName [] (Just closureType) $ fold
-            [
-              getstatic field
-            , ifnonnull mempty $ fold loadCodes
-            , getstatic field
-            , greturn closureType
-            ]
+          return $ Just (modClass, qClName, dataClass, field, fold loadCodes, recIndexes)
 
 buildDynCon :: Id -> DataCon -> [StgArg] -> [Id] -> CodeGen ( CgIdInfo
-                                                            , CodeGen (Code, RecIndexes) )
+                                                            , CodeGen (Code, RecIndexes, FieldType) )
 buildDynCon binder con [] _ = do
   dflags <- getDynFlags
   return ( mkCgIdInfo dflags binder (mkConLFInfo con)
-         , return (mempty, []) )
+         , return (mempty, [], obj $ dataConClass dflags con) )
 -- buildDynCon binder con [arg]
 --   | maybeIntLikeCon con
 --   , StgLitArg (MachInt val) <- arg
@@ -83,9 +82,9 @@ buildDynCon binder con [] _ = do
 --       -- TODO: Generate offset into charlike array
 --       unimplemented "buildDynCon: CHARLIKE"
 buildDynCon binder con args recIds = do
-  _ <- getDynFlags
+  dflags <- getDynFlags
   (idInfo, cgLoc) <- rhsConIdInfo binder lfInfo
-  return (idInfo, genCode cgLoc)
+  return (idInfo, genCode dflags cgLoc)
   where lfInfo = mkConLFInfo con
         maybeFields = map repFieldType_maybe $ dataConRepArgTys con
         nvFtArgs = mapMaybe (\(mft, arg) ->
@@ -104,18 +103,13 @@ buildDynCon binder con args recIds = do
               loadCode <- getArgLoadCode (NonVoid arg)
               return (is, code <> loadCode)
 
-        genCode cgLoc = do
+        genCode dflags cgLoc = do
           (recIndexes, loadsCode) <- foldM foldLoads ([], mempty) indexFtArgs
           let conCode =
                   new dataFt
                <> dup dataFt
                <> loadsCode
                <> invokespecial (mkMethodRef dataClass "<init>" fields void)
-               -- <> fold (map (\i ->
-               --                   dup dataFt
-               --                <> dup dataFt
-               --                <> putfield (mkFieldRef dataClass (constrField i) closureType))
-               --           is)
-          return (mkRhsInit cgLoc conCode, recIndexes)
-          where dataFt = locFt cgLoc
-                dataClass = getFtClass dataFt
+          return (mkRhsInit cgLoc conCode, recIndexes, dataFt)
+          where dataFt    = obj dataClass
+                dataClass = dataConClass dflags con

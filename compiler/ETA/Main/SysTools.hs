@@ -239,7 +239,9 @@ initSysTools mbMinusB
 -- returns a Unix-format path (relying on getBaseDir to do so too)
 findTopDir :: Maybe String -- Maybe TopDir path (without the '-B' prefix).
            -> IO String    -- TopDir (in Unix format '/' separated)
-findTopDir _ = getAppUserDataDirectory "eta"
+findTopDir _ = do
+  appdir <- getAppUserDataDirectory "eta"
+  return $ appdir </> cProjectVersionNumbers
 
 -- findTopDir (Just minusb) = return (normalise minusb)
 -- findTopDir Nothing
@@ -357,7 +359,7 @@ runJavac dflags args = do
                   then []
                   else ["-cp", classPathFolded ]
       allArgs = ["-verbose"] ++ args0 ++ classPath ++ args ++ opts
-  (exitCode, stdout, stderr) <-
+  (exitCode, _stdout, stderr) <-
     readProcessEnvWithExitCode prog allArgs  []
 
   case exitCode of

@@ -7,15 +7,41 @@ below, feel free to join us on `Gitter <https://gitter.im/typelead/eta>`_ so we 
 help you troubleshoot.
 
 Installing Eta
-----------------
+--------------
 
-Currently, the there are a few ways of installing Eta:
+Currently, there are a few ways of installing Eta:
 
-#. Source
-#. Docker
-#. Nix
+#. Binary Installation
+#. Source Installation
+#. Docker Image
+#. Nix Environment
 
-Method 1: Source Installation
+Method 1: Binary Installation
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Eta Version: 0.0.9b1
+
+Etlas Version: 1.0.2.0
+
+1. Make sure `JDK 7 or above <http://www.oracle.com/technetwork/java/javase/downloads/jdk8-downloads-2133151.html>`_ are installed on your system and ``java`` is on the ``$PATH``. 
+
+2. Download the Etlas binary for your platform.
+
+   - `Linux (64-bit) <http://88a2a1b21f8e03a6bc8d-8f2e61d843ea88e4f30ab3f81ca0e396.r42.cf5.rackcdn.com/etlas-1.0.2.0/binaries/x86_64-linux/etlas>`_
+   - `Mac (64-bit) <http://88a2a1b21f8e03a6bc8d-8f2e61d843ea88e4f30ab3f81ca0e396.r42.cf5.rackcdn.com/etlas-1.0.2.0/binaries/x86_64-osx/etlas>`_
+   - `Windows (64-bit) <http://88a2a1b21f8e03a6bc8d-8f2e61d843ea88e4f30ab3f81ca0e396.r42.cf5.rackcdn.com/etlas-1.0.2.0/binaries/x86_64-windows/etlas.exe>`_
+
+3. Place the binary in in your ``$PATH``.
+
+4. Give the program executable permissions (on Unix-based systems).
+
+.. code-block:: console
+
+   $ chmod +x etlas
+
+5. Start using it and it will download everything you need on demand. Head over to :ref:`setting-up-first-project`.
+
+Method 2: Source Installation
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 Prerequisites
@@ -36,18 +62,36 @@ General
 Ubuntu
 """"""
 
-- Install ``bz2``, ``ncurses``, ``zlib``.
+- Install ``bz2``, ``ncurses`` and ``zlib``.
 
 .. code-block:: console
 
-  sudo apt-get install zlib1g-dev libncurses5-dev libbz2-dev
+   $ sudo apt-get install zlib1g-dev libncurses5-dev libbz2-dev
 
 - Make sure locale is set to UTF8.
 
 .. code-block:: console
 
-  export LC_ALL=en_US.UTF-8
-  export LANG=en_US.UTF-8
+   $ export LC_ALL=en_US.UTF-8
+   $ export LANG=en_US.UTF-8
+
+Fedora
+""""""
+
+- Install ``bzip2``, ``ncurses`` and ``zlib``.
+
+.. code-block:: console
+
+   $ sudo dnf install zlib-devel ncurses-devel bzip2-devel
+  
+OpenSUSE
+""""""""
+
+- Install ``bz2``, ``ncurses``, and ``zlib``.
+
+.. code-block:: console
+
+   $ sudo zypper install zlib-devel libncurses5 ncurses5-devel libbz2-devel
 
 OS X
 """"
@@ -77,18 +121,18 @@ Replace ``[current-stable-tag]`` with the tag listed in the README of the eta re
 
   .. code-block:: console
 
-    git clone --recursive --branch [current-stable-tag] https://github.com/typelead/eta
-    cd eta
-    ./install.sh # or install.cmd in windows command prompt
+     $ git clone --recursive --branch [current-stable-tag] https://github.com/typelead/eta
+     $ cd eta
+     $ ./install.sh # or install.cmd in windows command prompt
 
 .. note::
 
-  If you omit the `--recursive` flag to `git clone`, you will need to
-  initialize the project's submodules before running `install.sh` or `install.cmd`:
+  If you omit the ``--recursive`` flag to ``git clone``, you will need to
+  initialize the project's submodules before running ``install.sh`` or ``install.cmd``:
 
   .. code-block:: console
 
-    git submodule update --init --recursive
+     $ git submodule update --init --recursive
 
 Once the installation is done, you will now have access to the following command-line tools:
 
@@ -99,20 +143,20 @@ Check to ensure that they are on the ``PATH`` with the following commands:
 
 .. code-block:: console
 
-   eta --version
-   etlas --version
+   $ eta --version
+   $ etlas --version
 
 If you obtain an error that either tool is missing, run the following command:
 
 .. code-block:: console
 
-   stack path --local-bin
+   $ stack path --local-bin
 
 Add the path that you obtain in the output to your ``PATH`` environment variable.
 
 
-Method 2: Docker
-^^^^^^^^^^^^^^^^
+Method 3: Docker Image
+^^^^^^^^^^^^^^^^^^^^^^
 
 Prerequisites
 """""""""""""
@@ -128,10 +172,10 @@ To obtain an environment with ``eta`` and ``etlas``, run the following command:
 
 .. code-block:: console
 
-  docker run -it typelead/eta
+   $ docker run -it typelead/eta
 
-Method 3: Nix
-^^^^^^^^^^^^^
+Method 4: Nix Environment
+^^^^^^^^^^^^^^^^^^^^^^^^^
 
 Prerequisites
 """""""""""""
@@ -147,7 +191,7 @@ To obtain an environment with ``eta`` and ``etlas``, run the following command:
 
 .. code-block:: console
 
-  nix-shell -A eta-build-shell
+   $ nix-shell -A eta-build-shell
 
 Updating Eta
 ------------
@@ -160,7 +204,7 @@ your system, and run the following command:
 
 .. code-block:: console
 
-   ./update.sh # or update.cmd in windows command prompt
+   $ ./update.sh # or update.cmd in windows command prompt
 
 This will do a fresh installation, recompiling all the core libraries with the most
 recent version of the compiler.
@@ -169,8 +213,8 @@ If you have existing Etlas projects, make sure you run
 
 .. code-block:: console
 
-  etlas clean
-  etlas install --dependencies-only
+   $ etlas clean
+   $ etlas install --dependencies-only
 
 inside each project before proceeding with your normal development so that Etlas
 recognizes the updated libraries.
@@ -192,7 +236,7 @@ Running Your First Program
 
    .. code-block:: console
 
-     eta Main.hs
+      $ eta Main.hs
 
    This will compile the program to a standalone JAR with the ``Run``- prefix.
 
@@ -200,7 +244,7 @@ Running Your First Program
 
    .. code-block:: console
 
-     java -jar RunMain.jar
+      $ java -jar RunMain.jar
 
 .. _setting-up-first-project:
 
@@ -217,43 +261,92 @@ in the Haskell ecosystem, read
 
    .. code-block:: console
 
-      mkdir eta-first
-      cd eta-first
+      $ mkdir eta-first
+      $ cd eta-first
 
 #. Initialize the project with Etlas.
 
    .. code-block:: console
 
-      etlas init
+      $ etlas init
 
-   This is an interactive command that will ask you questions and help you generate
-   a Cabal project file for your project.
+      Package name? [default: eta] eta-first
+      Package version? [default: 0.1.0.0]
+      Please choose a license:
+        1) GPL-2
+        2) GPL-3
+        3) LGPL-2.1
+        4) LGPL-3
+        5) AGPL-3
+        6) BSD2
+      * 7) BSD3
+        8) MIT
+        9) ISC
+        10) MPL-2.0
+        11) Apache-2.0
+        12) PublicDomain
+        13) AllRightsReserved
+        14) Other (specify)
+      Your choice? [default: BSD3]
+      Author name? [default: ...]
+      Maintainer email? [default: ...]
+      Project homepage URL?
+      Project synopsis?
+      Project category:
+      * 1) (none)
+        2) Codec
+        3) Concurrency
+        4) Control
+        5) Data
+        6) Database
+        7) Development
+        8) Distribution
+        9) Game
+        10) Graphics
+        11) Language
+        12) Math
+        13) Network
+        14) Sound
+        15) System
+        16) Testing
+        17) Text
+        18) Web
+        19) Other (specify)
+      Your choice? [default: (none)]
+      What does the package build:
+        1) Library
+        2) Executable
+      Your choice? 2
+      Source directory:
+      * 1) (none)
+        2) src
+        3) Other (specify)
+      Your choice? [default: (none)] 2
+      What base language is the package written in:
+      * 1) Haskell2010
+        2) Haskell98
+        3) Other (specify)
+      Your choice? [default: Haskell2010] 1
+      Add informative comments to each field in the cabal file (y/n)? [default: n] n
 
-   - **Package name** - Press enter to select the default.
-   - **Package version** - Press enter to select the default.
-   - **License** - Press enter to select the default.
-   - **Author name** - Press enter to select the default.
-   - **Maintainer email** - Press enter to select the default.
-   - **Project homepage URL** - Press enter to select the default.
-   - **Project synopsis** - Press enter to select the default.
-   - **Project category** - Press enter to select the default.
-   - **Package build** - Press 2 to select **Executable**.
-   - **Main module** - Press enter to select the default.
-   - **Base language** - Press enter to select the default.
-   - **Inline documentation** - Press enter to select the default.
-   - **Source directory** - Press 2 to select **src**.
+      Guessing dependencies...
+
+      Generating LICENSE...
+      Generating Setup.hs...
+      Generating ChangeLog.md...
+      Generating example.cabal...
 
    The project structure should look like this:
 
    .. code-block:: console
 
-      eta-first/
-      |--src/
-      |----Main.hs
-      |--ChangeLog.md
-      |--LICENSE
-      |--eta-first.cabal
-      |--Setup.hs
+      eta-first
+      - src
+        - Main.hs
+      - ChangeLog.md
+      - LICENSE
+      - eta-first.cabal
+      - Setup.hs
 
 #. Add the files ``Main.hs`` and ``Primes.hs`` in ``src/`` as shown below.
 
@@ -290,7 +383,7 @@ in the Haskell ecosystem, read
 
    .. code-block:: console
 
-      etlas run
+      $ etlas run
 
    .. note::
 
@@ -303,16 +396,16 @@ in the Haskell ecosystem, read
 
       .. code-block:: console
 
-          etlas clean
-          etlas configure --enable-uberjar-mode
+         $ etlas clean
+         $ etlas configure --enable-uberjar-mode
 
       These commands need only be run once to set the local Etlas configuration.
       To go back to shared mode for the project:
 
       .. code-block:: console
 
-          etlas clean
-          etlas configure --disable-uberjar-mode
+         $ etlas clean
+         $ etlas configure --disable-uberjar-mode
 
       Beware that this can be very slow. Work is being done to
       `improve uberjar performance <https://github.com/typelead/eta/issues/20>`_.

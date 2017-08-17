@@ -87,7 +87,6 @@ import System.PosixCompat.Files (fileExist, touchFile)
 import Control.Monad hiding (void)
 import Data.Foldable    (fold)
 import Data.List        ( partition, nub )
-import Data.Monoid ((<>))
 import Data.Maybe
 -- import System.Environment
 -- import Data.Char
@@ -1091,7 +1090,8 @@ doCpp dflags _raw input_fn output_fn = do
     etaVersionH <- getEtaVersionPathName dflags
     let hsSourceCppOpts =
           [ "-D__GLASGOW_HASKELL__=" ++ ghcProjectVersionInt
-          , "-D__ETA_VERSION__=" ++ cProjectVersionInt
+          , "-DETA_VERSION=" ++ cProjectVersionInt
+          , "-DETA_BUILD_NUMBER=" ++ cProjectPatchLevel
           , "--include=" ++ etaVersionH
           ]
         flags = verbFlags   ++ include_paths ++ hsSourceCppOpts
@@ -1295,7 +1295,7 @@ linkGeneric dflags oFiles depPackages = do
     --   log_action dflags dflags SevInfo noSrcSpan defaultUserStyle
     --       ((text $ "Warning: -rtsopts and -with-rtsopts have no effect with"
     --          ++ " -no-hs-main.") $$
-    --        (text $ "    Call hsInit() from your main() method to set"
+    --        (text $ "    Call Rts.init() from your main() method to set"
     --          ++ " these options."))
     -- TODO: Use conduits to combine the jars
     mainFiles' <- maybeMainAndManifest dflags isExecutable
@@ -1359,17 +1359,11 @@ mkRtsMainClass dflags mainClass
   = mkClassFile java7 [Public, Super] mainClass' Nothing [] []
   [
     mkMethodDef mainClass' [Public, Static] "main" [jarray jstring] void $ fold
-      [ renderRtsConfig dflags True
-      , gstore rtsConfigType (1 :: Int)
-      , gload (jarray jstring) 0
+      [ gload (jarray jstring) 0
       -- TODO: Find main module
-      , invokestatic $ mkMethodRef (moduleJavaClass mainMod) "DZCmain_closure" [] (Just closureType)
-      , gload rtsConfigType 1
-      , invokestatic $ mkMethodRef (rts "Rts") "hsMain" [ jarray jstring
-                                                        , closureType
-                                                        , rtsConfigType]
-                                                        (ret exitCodeType)
-      , pop exitCodeType
+      , invokestatic $ mkMethodRef (moduleJavaClass mainMod) "DZCmain" [] (Just closureType)
+      , invokestatic $ mkMethodRef (rts "Runtime") "main" [ jarray jstring
+                                                          , closureType ] void
       , vreturn ]
   ]
   where mainClass' = T.pack mainClass

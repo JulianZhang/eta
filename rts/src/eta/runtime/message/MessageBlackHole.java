@@ -1,22 +1,22 @@
 package eta.runtime.message;
 
-import eta.runtime.stg.StgTSO;
+import eta.runtime.stg.TSO;
 import eta.runtime.stg.Capability;
-import eta.runtime.thunk.StgThunk;
+import eta.runtime.thunk.Thunk;
 
 public final class MessageBlackHole extends Message {
 
-    public final StgTSO tso;
-    public final StgThunk bh;
+    public final TSO tso;
+    public final Thunk bh;
 
-    public MessageBlackHole(final StgTSO tso, final StgThunk bh) {
+    public MessageBlackHole(final TSO tso, final Thunk bh) {
         this.tso = tso;
         this.bh = bh;
     }
 
     @Override
-    public final void execute(Capability cap) {
-        boolean blocked = cap.messageBlackHole(this);
+    public void execute(Capability cap) {
+        boolean blocked = cap.messageBlackHole(new MessageBlackHole(tso, bh), true);
         if (!blocked) {
             cap.tryWakeupThread(tso);
         }

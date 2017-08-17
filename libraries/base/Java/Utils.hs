@@ -17,7 +17,7 @@
 -----------------------------------------------------------------------------
 
 module Java.Utils
-  ( JClass
+  ( JClass(..)
   , getClass
   , toString
   , equals
@@ -28,9 +28,9 @@ module Java.Utils
   , toString#
   , safeDowncast
   , Void
-  , Comparator
-  , Comparable
-  , Enum )
+  , Comparator(..)
+  , Comparable(..)
+  , Enum(..) )
 where
 
 import GHC.Base
@@ -40,9 +40,10 @@ import Java.String
 data {-# CLASS "java.lang.Class" #-} JClass a = JClass (Object# (JClass a))
   deriving Class
 
-{-# INLINE getClass #-}
-getClass :: forall (a :: *). Proxy a -> JClass a
-getClass _ = JClass (getClass# (proxy# :: Proxy# a))
+getClass :: forall a. Class a => Proxy a -> JClass a
+getClass _ = forName (classIdentifier (proxy# :: Proxy# a))
+
+foreign import java unsafe "@static java.lang.Class.forName" forName :: String -> JClass a
 
 foreign import java unsafe classObject :: (a <: Object) => a -> JClass a
 foreign import java unsafe toString    :: (a <: Object) => a -> JString

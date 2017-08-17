@@ -8,18 +8,18 @@ module ETA.Main.Constants where
 
 
 hiVersion :: Integer
-hiVersion = read (cProjectVersionInt ++ cProjectPatchLevel) :: Integer
+hiVersion = read cProjectVersionInt :: Integer
 
-cProjectName, cProjectVersion, cProjectVersionInt, cProjectPatchLevel, cProjectPatchLevel1,
-  cProjectPatchLevel2, cProjectHomeURL, cProjectIssueReportURL, ghcProjectVersion,
-  ghcProjectVersionInt, ghcprojectPatchLevel, ghcProjectPatchLevel1, ghcProjectPatchLevel2
+cProjectName, cProjectVersion, cProjectVersionNumbers, cProjectVersionInt, cProjectPatchLevel, cProjectPatchLevel1, cProjectPatchLevel2, cProjectHomeURL, cProjectIssueReportURL, ghcProjectVersion, ghcProjectVersionInt, ghcprojectPatchLevel, ghcProjectPatchLevel1, ghcProjectPatchLevel2
   :: String
-cProjectName = "The Eta programming language compiler"
+cProjectName = "Compiler for the Eta Programming Language"
 -- @VERSION_CHANGE@
-cProjectVersion = "0.0.6"
-cProjectVersionInt = "6"
-cProjectPatchLevel = "1"
-cProjectPatchLevel1 = "1"
+cProjectVersion = "0.0.9b" ++ cProjectPatchLevel
+cProjectVersionNumbers = "0.0.9." ++ cProjectPatchLevel
+cProjectVersionInt = "9"
+-- @BUILD_NUMBER@
+cProjectPatchLevel = "2"
+cProjectPatchLevel1 = "2"
 cProjectPatchLevel2 = ""
 cProjectHomeURL = "http://github.com/typelead/eta"
 cProjectIssueReportURL = cProjectHomeURL ++ "/issues"

@@ -1,18 +1,19 @@
 package eta.runtime.thunk;
 
-import eta.runtime.stg.StgClosure;
+import eta.runtime.stg.Closure;
 import eta.runtime.stg.StgContext;
-import eta.runtime.stg.StgConstr;
-import eta.runtime.apply.Apply;
+import eta.runtime.stg.DataCon;
+
 
 public class SelectorLNoUpd extends SelectorNoUpd {
 
-    public SelectorLNoUpd(int i, StgClosure p) {
+    public SelectorLNoUpd(int i, Closure p) {
         super(i, p);
     }
 
     @Override
-    public void selectEnter(StgContext context) {
-        context.L(1, ((StgConstr) context.R(1)).getL(index));
+    public Closure selectEnter(StgContext context, DataCon result) {
+        context.L(1, result.getL(index));
+        return null;
     }
 }

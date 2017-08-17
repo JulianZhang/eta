@@ -88,7 +88,7 @@ Primitive Types Reference
 +-----------------+------------------------+--------------------------------+---------------------------------------------+
 | -               | ``Object# c``          | Reference type                 | Depends on the tag of c                     |
 +-----------------+------------------------+--------------------------------+---------------------------------------------+
-| -               | ``Addr#``              | java.nio.ByteBuffer            |                                             |
+| -               | ``Addr#``              | long                           |                                             |
 +-----------------+------------------------+--------------------------------+---------------------------------------------+
 | -               | ````State# a````       | none                           |                                             |
 +-----------------+------------------------+--------------------------------+---------------------------------------------+
@@ -100,45 +100,45 @@ Primitive Types Reference
 +-----------------+------------------------+--------------------------------+---------------------------------------------+
 | ``a ~R b``      | ``a ~R# b``            | none                           |                                             |
 +-----------------+------------------------+--------------------------------+---------------------------------------------+
-| -               | ``RealWorld``          | eta.runtime.stg.StgClosure     |                                             |
+| -               | ``RealWorld``          | eta.runtime.stg.Closure     |                                             |
 +-----------------+------------------------+--------------------------------+---------------------------------------------+
-| ``Array``       | ``Array#``             | eta.runtime.io.StgArray        |                                             |
+| ``Array``       | ``Array#``             | eta.runtime.io.Array        |                                             |
 +-----------------+------------------------+--------------------------------+---------------------------------------------+
-| -               | ``ByteArray#``         | eta.runtime.io.StgByteArray    |                                             |
+| -               | ``ByteArray#``         | eta.runtime.io.ByteArray    |                                             |
 +-----------------+------------------------+--------------------------------+---------------------------------------------+
-| -               | ``ArrayArray#``        | eta.runtime.stg.StgArray       | Typically only contains ``ByteArray#`` and  |
+| -               | ``ArrayArray#``        | eta.runtime.stg.Array       | Typically only contains ``ByteArray#`` and  |
 |                 |                        |                                | ``ArrayArray#`` types as elements.          |
 +-----------------+------------------------+--------------------------------+---------------------------------------------+
-| -               | ``SmallArray#``        | eta.runtime.stg.StgArray       | Identical to ``Array#``.                    |
+| -               | ``SmallArray#``        | eta.runtime.stg.Array       | Identical to ``Array#``.                    |
 |                 |                        |                                | Kept for compatibility with GHC.            |
 +-----------------+------------------------+--------------------------------+---------------------------------------------+
-| -               | ``MutableArray#``      | eta.runtime.io.StgArray        |                                             |
+| -               | ``MutableArray#``      | eta.runtime.io.Array        |                                             |
 +-----------------+------------------------+--------------------------------+---------------------------------------------+
-| -               | ``MutableByteArray#``  | eta.runtime.io.StgByteArray    |                                             |
+| -               | ``MutableByteArray#``  | eta.runtime.io.ByteArray    |                                             |
 +-----------------+------------------------+--------------------------------+---------------------------------------------+
-| -               | ``MutableArrayArray#`` | eta.runtime.stg.StgArray       | Typically only contains ``ByteArray#``,     |
+| -               | ``MutableArrayArray#`` | eta.runtime.stg.Array       | Typically only contains ``ByteArray#``,     |
 |                 |                        |                                | ``ArrayArray#``, and the mutable variants   |
 |                 |                        |                                | as elements.                                |
 +-----------------+------------------------+--------------------------------+---------------------------------------------+
-| -               | ``SmallMutableArray#`` | eta.runtime.stg.StgArray       | Identical to ``MutableArray#``.             |
+| -               | ``SmallMutableArray#`` | eta.runtime.stg.Array       | Identical to ``MutableArray#``.             |
 |                 |                        |                                | Kept for compatibility with GHC.            |
 +-----------------+------------------------+--------------------------------+---------------------------------------------+
 | ``IORef``,      |                        |                                |                                             |
-| ``STRef``       | ``MutVar#``            | eta.runtime.io.StgMutVar       |                                             |
+| ``STRef``       | ``MutVar#``            | eta.runtime.io.MutVar       |                                             |
 +-----------------+------------------------+--------------------------------+---------------------------------------------+
-| ``MVar``        | ``MVar#``              | eta.runtime.concurrent.StgMVar |                                             |
+| ``MVar``        | ``MVar#``              | eta.runtime.concurrent.MVar |                                             |
 +-----------------+------------------------+--------------------------------+---------------------------------------------+
-| ``TVar``        | ``TVar#``              | eta.runtime.stm.StgTVar        |                                             |
+| ``TVar``        | ``TVar#``              | eta.runtime.stm.TVar        |                                             |
 +-----------------+------------------------+--------------------------------+---------------------------------------------+
 | ``StablePtr a`` | ``StablePtr#``         | int                            |                                             |
 +-----------------+------------------------+--------------------------------+---------------------------------------------+
 | ``StableName``  | ``StableName#``        | int                            |                                             |
 +-----------------+------------------------+--------------------------------+---------------------------------------------+
-| -               | ``BCO#``               | eta.runtime.interpreter.StgBCO |                                             |
+| -               | ``BCO#``               | eta.runtime.interpreter.BCO |                                             |
 +-----------------+------------------------+--------------------------------+---------------------------------------------+
-| ``Weak``        | ``Weak#``              | eta.runtime.stg.StgWeak        |                                             |
+| ``Weak``        | ``Weak#``              | eta.runtime.stg.Weak        |                                             |
 +-----------------+------------------------+--------------------------------+---------------------------------------------+
-| ``ThreadId``    | ``ThreadId#``          | eta.runtime.stg.StgTSO         |                                             |
+| ``ThreadId``    | ``ThreadId#``          | eta.runtime.stg.TSO         |                                             |
 +-----------------+------------------------+--------------------------------+---------------------------------------------+
 
 Declaring Tag Types
@@ -268,35 +268,35 @@ produced on running the program. This is useful in filing a more helpful bug rep
 
     Exception in thread "main" java.lang.NoClassDefFoundError: Calendar
             at oldzmtimezm1zi1zi0zi3.system.Time$satzus10SQ.thunkEnter(Unknown Source)
-            at eta.runtime.thunk.StgInd.enter(StgInd.java:19)
-            at eta.runtime.stg.StgClosure.evaluate(StgClosure.java:20)
+            at eta.runtime.thunk.UpdatableThunk.enter(UpdatableThunk.java:19)
+            at eta.runtime.stg.Closure.evaluate(Closure.java:20)
             at base.text.parsercombinators.ReadP$skipSpaceszuskip.enter(Unknown Source)
             at base.ghc.Read$satzus5BWW.enter(Unknown Source)
-            at eta.runtime.apply.StgFun.apply(StgFun.java:116)
+            at eta.runtime.apply.Function.apply(Function.java:116)
             at eta.runtime.apply.Apply$8.enter(Apply.java:75)
             at base.text.parsercombinators.ReadP$satzus341G.enter(Unknown Source)
-            at eta.runtime.apply.StgFun.apply(StgFun.java:116)
+            at eta.runtime.apply.Function.apply(Function.java:116)
             at eta.runtime.apply.Apply$8.enter(Apply.java:75)
             at base.text.parsercombinators.ReadP$satzus341G.enter(Unknown Source)
-            at eta.runtime.apply.StgFun.apply(StgFun.java:116)
+            at eta.runtime.apply.Function.apply(Function.java:116)
             at eta.runtime.apply.Apply$8.enter(Apply.java:75)
             at base.text.parsercombinators.ReadP$run.enter(Unknown Source)
             at oldzmtimezm1zi1zi0zi3.system.Time$satzus10SY.thunkEnter(Unknown Source)
-            at eta.runtime.thunk.StgInd.enter(StgInd.java:19)
-            at eta.runtime.stg.StgClosure.evaluate(StgClosure.java:20)
+            at eta.runtime.thunk.UpdatableThunk.enter(UpdatableThunk.java:19)
+            at eta.runtime.stg.Closure.evaluate(Closure.java:20)
             at oldzmtimezm1zi1zi0zi3.system.Time$lvl98zus13J8.thunkEnter(Unknown Source)
-            at eta.runtime.thunk.StgInd.enter(StgInd.java:19)
-            at eta.runtime.stg.StgClosure.evaluate(StgClosure.java:20)
+            at eta.runtime.thunk.UpdatableThunk.enter(UpdatableThunk.java:19)
+            at eta.runtime.stg.Closure.evaluate(Closure.java:20)
             at base.ghc.Base$zpzp.enter(Unknown Source)
             at oldzmtimezm1zi1zi0zi3.system.Time$doFmtzus13PB.enter(Unknown Source)
             at oldzmtimezm1zi1zi0zi3.system.Time$lvl112zus13P6.thunkEnter(Unknown Source)
-            at eta.runtime.thunk.StgInd.enter(StgInd.java:19)
-            at eta.runtime.stg.StgClosure.evaluate(StgClosure.java:20)
+            at eta.runtime.thunk.UpdatableThunk.enter(UpdatableThunk.java:19)
+            at eta.runtime.stg.Closure.evaluate(Closure.java:20)
             at base.ghc.Base$zpzp.enter(Unknown Source)
             at oldzmtimezm1zi1zi0zi3.system.Time$doFmtzus13PB.enter(Unknown Source)
             at oldzmtimezm1zi1zi0zi3.system.Time$zdwformatCalendarTime.enter(Unknown Source)
             at oldzmtimezm1zi1zi0zi3.system.Time$zdfShowClockTimezuzdcshow.enter(Unknown Source)
-            at eta.runtime.apply.StgFun.apply(StgFun.java:116)
+            at eta.runtime.apply.Function.apply(Function.java:116)
             at eta.runtime.apply.ApP.stackEnter(ApP.java:17)
             at eta.runtime.stg.StackFrame.enter(StackFrame.java:43)
             at eta.runtime.stg.StgContext.checkForStackFrames(StgContext.java:75)
@@ -305,15 +305,15 @@ produced on running the program. This is useful in filing a more helpful bug rep
             at base.system.IO$print1.enter(Unknown Source)
             at base.system.IO$print.enter(Unknown Source)
             at eta.runtime.apply.Apply$20.enter(Apply.java:210)
-            at eta.runtime.apply.StgPAP.apply(StgPAP.java:46)
+            at eta.runtime.apply.PAP.apply(PAP.java:46)
             at eta.runtime.apply.ApV.stackEnter(ApV.java:12)
             at eta.runtime.stg.StackFrame.enter(StackFrame.java:43)
             at eta.runtime.stg.StackFrame.enter(StackFrame.java:26)
             at eta.runtime.stg.StackFrame.enter(StackFrame.java:26)
             at eta.runtime.stg.Capability.schedule(Capability.java:245)
-            at eta.runtime.RtsScheduler.scheduleWaitThread(RtsScheduler.java:57)
-            at eta.runtime.Rts.evalLazyIO(Rts.java:92)
-            at eta.runtime.Rts.hsMain(Rts.java:37)
+            at eta.RuntimeScheduler.scheduleWaitThread(RtsScheduler.java:57)
+            at eta.Runtime.evalLazyIO(Rts.java:92)
+            at eta.Runtime.main(Rts.java:37)
             at eta.main.main(Unknown Source)
     Caused by: java.lang.ClassNotFoundException: Calendar
             at java.net.URLClassLoader.findClass(URLClassLoader.java:381)

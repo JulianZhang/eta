@@ -35,8 +35,8 @@ module Debug.Trace (
 
         -- * Eventlog tracing
         -- $eventlog_tracing
-        -- traceEvent, TODO: Implement!
-        -- traceEventIO,
+        traceEvent,
+        traceEventIO,
 
         -- * Execution phase markers
         -- $markers
@@ -76,7 +76,7 @@ import Data.List
 -- @since 4.5.0.0
 traceIO :: String -> IO ()
 traceIO msg = do
-    withCString "%s\n" $ \cfmt -> do
+    withCString "%s" $ \cfmt -> do
      -- NB: debugBelch can't deal with null bytes, so filter them
      -- out so we don't accidentally truncate the message.  See Trac #9395
      let (nulls, msg') = partition (=='\0') msg
@@ -88,8 +88,8 @@ traceIO msg = do
 
 -- don't use debugBelch() directly, because we cannot call varargs functions
 -- using the FFI.
-debugBelch :: CString -> CString -> IO ()
-debugBelch = undefined
+foreign import java unsafe "@static eta.base.Utils.debugBelch"
+  debugBelch :: CString -> CString -> IO ()
 
 -- |
 putTraceMsg :: String -> IO ()
@@ -221,10 +221,10 @@ traceShowM = traceM . show
 -- that uses 'traceEvent'.
 --
 -- @since 4.5.0.0
--- traceEvent :: String -> a -> a
--- traceEvent msg expr = unsafeDupablePerformIO $ do
---     traceEventIO msg
---     return expr
+traceEvent :: String -> a -> a
+traceEvent msg expr = unsafeDupablePerformIO $ do
+    traceEventIO msg
+    return expr
 
 -- | The 'traceEventIO' function emits a message to the eventlog, if eventlog
 -- profiling is available and enabled at runtime.
@@ -233,10 +233,10 @@ traceShowM = traceM . show
 -- other IO actions.
 --
 -- @since 4.5.0.0
--- traceEventIO :: String -> IO ()
--- traceEventIO msg =
---   GHC.Foreign.withCString utf8 msg $ \(Ptr p) -> IO $ \s ->
---     case traceEvent# p s of s' -> (# s', () #)
+traceEventIO :: String -> IO ()
+traceEventIO msg =
+  GHC.Foreign.withCString utf8 msg $ \(Ptr p) -> IO $ \s ->
+    case traceEvent# p s of s' -> (# s', () #)
 
 -- $markers
 --

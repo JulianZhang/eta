@@ -151,15 +151,14 @@ instance Show ThreadId where
         showString "ThreadId " .
         showsPrec d (getThreadId (id2TSO t))
 
-foreign import java unsafe "@static eta.runtime.stg.StgTSO.getThreadId"
+foreign import java unsafe "@static eta.runtime.stg.TSO.getThreadId"
   getThreadId :: ThreadId# -> CInt
 
 id2TSO :: ThreadId -> ThreadId#
 id2TSO (ThreadId t) = t
 
--- foreign import ccall unsafe "cmp_thread"
-cmp_thread :: ThreadId# -> ThreadId# -> CInt
-cmp_thread = undefined
+foreign import java unsafe "@static eta.base.Utils.cmp_thread"
+  cmp_thread :: ThreadId# -> ThreadId# -> CInt
 -- Returns -1, 0, 1
 
 cmpThread :: ThreadId -> ThreadId -> Ordering
@@ -242,25 +241,25 @@ disableAllocationLimit = do
   ThreadId t <- myThreadId
   rts_disableThreadAllocationLimit t
 
--- We cannot do these operations safely on another thread, because on
--- a 32-bit machine we cannot do atomic operations on a 64-bit value.
--- Therefore, we only expose APIs that allow getting and setting the
--- limit of the current thread.
 -- foreign import ccall unsafe "rts_setThreadAllocationCounter"
 rts_setThreadAllocationCounter :: ThreadId# -> Int64 -> IO ()
-rts_setThreadAllocationCounter = undefined
+rts_setThreadAllocationCounter =
+  error "rts_setThreadAllocationCounter: Does not apply for the Eta RTS."
 
 -- foreign import ccall unsafe "rts_getThreadAllocationCounter"
 rts_getThreadAllocationCounter :: ThreadId# -> IO Int64
-rts_getThreadAllocationCounter = undefined
+rts_getThreadAllocationCounter =
+  error "rts_getThreadAllocationCounter: Does not apply for the Eta RTS."
 
 -- foreign import ccall unsafe "rts_enableThreadAllocationLimit"
 rts_enableThreadAllocationLimit :: ThreadId# -> IO ()
-rts_enableThreadAllocationLimit = undefined
+rts_enableThreadAllocationLimit =
+  error "rts_enableThreadAllocationLimit: Does not apply for the Eta RTS."
 
 -- foreign import ccall unsafe "rts_disableThreadAllocationLimit"
 rts_disableThreadAllocationLimit :: ThreadId# -> IO ()
-rts_disableThreadAllocationLimit = undefined
+rts_disableThreadAllocationLimit =
+  error "rts_disableThreadAllocationLimit: Does not apply for the Eta RTS."
 
 {- |
 Creates a new thread to run the 'IO' computation passed as the
@@ -360,7 +359,7 @@ this value, use 'setNumCapabilities'.
 @since 4.4.0.0
 -}
 foreign import java unsafe
-  "@static @field eta.runtime.stg.Capability.enabledCapabilities"
+  "@static eta.runtime.stg.Capability.getNumCapabilities"
   getNumCapabilities :: IO Int
 
 {- |
@@ -380,9 +379,8 @@ to avoid contention with other processes in the machine.
 setNumCapabilities :: Int -> IO ()
 setNumCapabilities i = c_setNumCapabilities (fromIntegral i)
 
--- foreign import ccall safe "setNumCapabilities"
-c_setNumCapabilities :: CUInt -> IO ()
-c_setNumCapabilities = error $ "setNumCapabilities: unimplemented"
+foreign import java unsafe "@static eta.runtime.stg.Capability.setNumCapabilities"
+  c_setNumCapabilities :: CUInt -> IO ()
 
 -- | Returns the number of CPUs that the machine has
 --
@@ -390,7 +388,7 @@ c_setNumCapabilities = error $ "setNumCapabilities: unimplemented"
 getNumProcessors :: IO Int
 getNumProcessors = fmap fromIntegral c_getNumberOfProcessors
 
-foreign import java unsafe "@static eta.runtime.RtsFlags.getNumberOfProcessors"
+foreign import java unsafe "@static eta.runtime.RuntimeOptions.getNumberOfProcessors"
   c_getNumberOfProcessors :: IO CUInt
 
 -- | Returns the number of sparks currently in the local spark pool
@@ -873,7 +871,8 @@ reportError ex = do
 -- the unsafe below.
 -- foreign import ccall unsafe "stackOverflow"
 callStackOverflowHook :: ThreadId# -> IO ()
-callStackOverflowHook = undefined
+callStackOverflowHook =
+  error "callStackOverflowHook: Not implemented yet."
 
 {-# NOINLINE uncaughtExceptionHandler #-}
 uncaughtExceptionHandler :: IORef (SomeException -> IO ())

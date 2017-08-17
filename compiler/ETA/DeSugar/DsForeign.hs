@@ -16,6 +16,7 @@ import ETA.Core.MkCore
 import ETA.DeSugar.DsMonad
 import ETA.HsSyn.HsSyn
 import ETA.Core.CoreUnfold
+import ETA.BasicTypes.Module
 import ETA.BasicTypes.VarEnv
 import ETA.BasicTypes.VarSet
 import ETA.BasicTypes.Id
@@ -42,7 +43,6 @@ import ETA.Prelude.PrelInfo ( primOpId )
 import ETA.Prelude.PrimOp
 import ETA.BasicTypes.BasicTypes
 import ETA.BasicTypes.Name
-import ETA.BasicTypes.OccName
 import ETA.BasicTypes.SrcLoc
 import ETA.Utils.Outputable hiding ((<>))
 import ETA.Utils.FastString
@@ -99,7 +99,9 @@ dsForeigns fdecls = do
           return (methodDefs, bs)
         doDecl (ForeignExport (L _ id) _ co
                               (CExport (L _ (CExportStatic extName _)) _)) = do
-            method <- dsFExport (Right id) co extName Nothing
+
+            mod    <- getModule
+            method <- dsFExport (Right id) co extName Nothing mod
             return ([method], [])
 
 dsFImport :: Id -> Coercion -> ForeignImport -> DsM ([Binding], [ClassExport])
@@ -130,37 +132,77 @@ dsPrimCall funId co fcall = do
         (argTypes, ioResType) = tcSplitFunTys funTy
 
 dsFCall :: Id -> Coercion -> ForeignCall -> Maybe Header -> DsM ([Binding], [ClassExport])
-dsFCall funId co fcall _ = do
-  dflags <- getDynFlags
-  (thetaArgs, extendsInfo) <- extendsMap thetaType
-  args <- mapM newSysLocalDs argTypes
-  (argPrimTypes, valArgs, argWrappers) <- mapAndUnzip3M (unboxArg extendsInfo) (map Var args)
-  (resPrimType, ccallResultType, resWrapper) <- boxResult extendsInfo ioResType
-  let workArgIds = [v | Var v <- valArgs]
-      fcall' = genJavaFCall fcall extendsInfo argPrimTypes (Right resPrimType) ioResType
-  ccallUniq <- newUnique
-  workUniq <- newUnique
-  -- Build worker
-  let workerType = mkForAllTys tvs $
-                   mkFunTys (map idType workArgIds) ccallResultType
-      ccallApp   = mkFCall dflags ccallUniq fcall' valArgs ccallResultType
-      workRhs    = mkLams tvs (mkLams workArgIds ccallApp)
-      workId     = mkSysLocal (fsLit "$wccall") workUniq workerType
+dsFCall funId co fcall _
+  | null thetaType && null argTypes
+  , Just funPtrType <- splitFunPtrType ioResType
+  , CCall (CCallSpec (StaticTarget label mPkgKey _) callConv safety) <- fcall = do
+    dflags    <- getDynFlags
+    ccallUniq <- newUnique
+    let fcall  = CCall (CCallSpec (StaticTarget (mkFastString label') mPkgKey True) callConv safety)
+        label' = serializeTarget False False True (unpackFS label) argFts resRep
+        resRep = maybe VoidRep typePrimRep resPrimType
+        argFts = repFieldTypes $ map unboxType argTypes
+        (argTypes, ioResType) = tcSplitFunTys (dropForAlls funPtrType)
+        resType
+          | Just (tc, _) <- splitTyConApp_maybe ioResType
+          , tc `hasKey` unitTyConKey = Nothing
+          | Just (_, resType') <- tcSplitIOType_maybe ioResType = Just resType'
+          | otherwise = Just ioResType
+        resPrimType = fmap unboxType resType
+        createFunPtrApp = mkFCall dflags ccallUniq fcall [Var realWorldPrimId] int64PrimTy
+    funPtrAddrId <- newSysLocalDs int64PrimTy
+    funPtrTyCon <- dsLookupTyCon funPtrTyConName
+    let funPtrDataCon = head $ tyConDataCons funPtrTyCon
+        funPtrWrapId  = dataConWrapId funPtrDataCon
+        rhs = Case createFunPtrApp funPtrAddrId
+                   (mkTyConApp funPtrTyCon [funPtrType])
+                   [(DEFAULT, [], funPtrApp)]
+        funPtrApp = mkCoreApps (Var funPtrWrapId) [Type funPtrType, Var funPtrAddrId]
+        {- We give a NOINLINE so that the FunPtr doesn't get added to
+           the funPtrMap twice. While getting added twice is thread-safe,
+           it creates unnecessary duplication. -}
+        refIdWithNoInline = funId `setInlinePragma` neverInlinePragma
+    return ([(refIdWithNoInline, rhs)], [])
+  | otherwise = do
+    dflags <- getDynFlags
+    (thetaArgs, extendsInfo) <- extendsMap thetaType
+    args <- mapM newSysLocalDs argTypes
+    (argPrimTypes, valArgs, argWrappers) <- mapAndUnzip3M (unboxArg extendsInfo) (map Var args)
+    (resPrimType, ccallResultType, resWrapper) <- boxResult extendsInfo ioResType
+    let workArgIds = [v | Var v <- valArgs]
+        fcall' = genJavaFCall fcall extendsInfo argPrimTypes (Right resPrimType) ioResType
+    ccallUniq <- newUnique
+    workUniq  <- newUnique
+    -- Build worker
+    let workerType = mkForAllTys tvs $ mkFunTys (map idType workArgIds) ccallResultType
+        ccallApp   = mkFCall dflags ccallUniq fcall' valArgs ccallResultType
+        workRhs    = mkLams tvs (mkLams workArgIds ccallApp)
+        workId     = mkSysLocal (fsLit "$wccall") workUniq workerType
 
-  -- Build wrapper
-  let workApp        = mkApps (mkVarApps (Var workId) tvs) valArgs
-      wrapperBody    = foldr ($) (resWrapper workApp) argWrappers
-      wrapRhs        = mkLams (tvs ++ thetaArgs ++ args) wrapperBody
-      wrapRhs'       = Cast wrapRhs co
-      funIdWithInline = funId
-                       `setIdUnfolding`
-                       mkInlineUnfolding (Just (length args)) wrapRhs'
-  return ([(workId, workRhs), (funIdWithInline, wrapRhs')], [])
+    -- Build wrapper
+    let workApp        = mkApps (mkVarApps (Var workId) tvs) valArgs
+        wrapperBody    = foldr ($) (resWrapper workApp) argWrappers
+        wrapRhs        = mkLams (tvs ++ thetaArgs ++ args) wrapperBody
+        wrapRhs'       = Cast wrapRhs co
+        funIdWithInline = funId
+                        `setIdUnfolding`
+                        mkInlineUnfolding (Just (length args)) wrapRhs'
+    return ([(workId, workRhs), (funIdWithInline, wrapRhs')], [])
 
   where ty = pFst $ coercionKind co
         (tvs, thetaFunTy) = tcSplitForAllTys ty
         (thetaType, funTy) = tcSplitPhiTy thetaFunTy
         (argTypes, ioResType) = tcSplitFunTys funTy
+        splitFunTyCon resType
+          | Just (tc, [tyArg]) <- tcSplitTyConApp_maybe resType
+          , tyConUnique tc == funPtrTyConKey
+          = Just tyArg
+          | otherwise = Nothing
+        splitFunPtrType resType
+          | arg@(Just _) <- splitFunTyCon resType = arg
+          | Just (_, resTy) <- tcSplitIOType_maybe resType
+          = splitFunPtrType resTy
+          | otherwise = Nothing
 
 genJavaFCall :: ForeignCall -> ExtendsInfo -> [Type] -> Either PrimRep (Maybe Type) -> Type -> ForeignCall
 genJavaFCall (CCall (CCallSpec (StaticTarget label mPkgKey isFun) JavaCallConv safety))
@@ -271,6 +313,23 @@ extendsMapWithVar thetaType = mkVarEnv keyVals
                   | otherwise = (tagTy', varTy', SuperBound)
                 var = getTyVar "extendsMap: Not type variable!" varTy
 
+unboxType :: Type -> Type
+unboxType ty
+  | isPrimitiveType ty = ty
+  | Just (_, ty') <- topNormaliseNewType_maybe ty
+  = unboxType ty'
+  | Just tc <- tyConAppTyCon_maybe ty
+  , tc `hasKey` boolTyConKey
+  = jboolPrimTy
+  | Just (tc, [ty']) <- splitTyConApp_maybe ty
+  , tc `hasKey` maybeTyConKey
+  = unboxType ty'
+  | Just (_,_,dataCon,dataConArgTys) <- splitDataProductType_maybe ty
+  , dataConSourceArity dataCon == 1
+  , (dataConArgTy1 : _) <- dataConArgTys
+  = unboxType dataConArgTy1
+  | otherwise = ty
+
 unboxArg :: ExtendsInfo -> CoreExpr -> DsM (Type, CoreExpr, CoreExpr -> CoreExpr)
 unboxArg vs arg
   | isPrimitiveType argType
@@ -306,9 +365,9 @@ unboxArg vs arg
                           [ (DataAlt nothingDataCon, [],
                              mkCoreLet (NonRec (getIdFromTrivialExpr primArg)
                                                (mkCoreApps (Var unsafeCoerceId)
-                                                           [ Type addrPrimTy
+                                                           [ Type (mkObjectPrimTy jstringTy) -- TODO: Hack, change this? -RM
                                                            , Type primTy
-                                                           , Lit nullAddrLit ]))
+                                                           , Lit nullRefLit ]))
                                        body),
                             (DataAlt justDataCon, [innerArg], bodyWrapper body)])
   | isProductType && dataConArity == 1 = do
@@ -557,10 +616,10 @@ dsFExport :: Either Int Id      -- The exported Id
                                 -- from C, and its representation type
           -> CLabelString       -- The name to export to C land
           -> Maybe Text         -- rawClassSpec & className
+          -> Module
           -> DsM ClassExport
 
-dsFExport closureId co externalName classSpec = do
-  mod <- fmap ds_mod getGblEnv
+dsFExport closureId co externalName classSpec mod = do
   dflags <- getDynFlags
   let resClass = typeDataConClass dflags extendsInfo resType
       (mFieldDef, loadClosureRef) =
@@ -572,7 +631,7 @@ dsFExport closureId co externalName classSpec = do
                <> getfield (mkFieldRef className fieldName closureType) ))
           (\fnId ->
               ( Nothing
-              , invokestatic (mkMethodRef (moduleJavaClass mod)
+              , invokestatic (mkMethodRef modClass
                                           (closure (idNameText dflags fnId))
                                           []
                                           (Just closureType))))
@@ -598,8 +657,7 @@ dsFExport closureId co externalName classSpec = do
   return ( rawClassSpec
          , addAttrsToMethodDef mAttrs
          $ mkMethodDef className accessFlags methodName argFts resFt $
-             invokestatic (mkMethodRef rtsGroup "lock" [] (ret capabilityType))
-          <> loadThis
+             loadThis
           <> new ap2Ft
           <> dup ap2Ft
           <> invokestatic (mkMethodRef runClass runClosure
@@ -612,28 +670,21 @@ dsFExport closureId co externalName classSpec = do
           <> invokespecial (mkMethodRef ap2Class "<init>" [ closureType
                                                           , closureType] void)
           -- TODO: Support java args > 5
-          <> invokestatic (mkMethodRef rtsGroup evalMethod evalArgFts
-                                       (ret hsResultType))
+          <> invokestatic (mkMethodRef rtsGroup evalMethod evalArgFts (ret closureType))
           <> (if voidResult
-              then mempty
-              else dup hsResultType)
-          <> hsResultCap
-          <> invokestatic (mkMethodRef rtsGroup "unlock" [capabilityType] void)
-          -- TODO: add a call to checkSchedStatus
-          <> (if voidResult
-             then vreturn
-             else ( hsResultValue
-                 <> unboxResult resType resClass rawResFt))
+              then pop closureType <> vreturn
+              else unboxResult resType resClass rawResFt)
          , mFieldDef )
   where ty = pSnd $ coercionKind co
+        modClass = moduleJavaClass mod
         (tyVars, thetaFunTy) = tcSplitForAllTys ty
         (tyVarBounds, funTy) = tcSplitPhiTy thetaFunTy
         (argTypes, ioResType) = tcSplitFunTys funTy
-        classFt = obj className
+        classFt  = obj className
         extendsInfo = extendsMapWithVar tyVarBounds
         loadThis
           | isJust staticMethodClass =
-            if runClosure == "runJava_closure"
+            if runClosure == "runJava"
             then aconst_null jobject
             else mempty
           | otherwise = gload classFt 0
@@ -647,10 +698,10 @@ dsFExport closureId co externalName classSpec = do
           | otherwise = False
         (evalArgFts, evalMethod, runClass) =
           case runClosure of
-            "runJava_closure" ->
-              ([capabilityType, jobject, closureType], "evalJava", "base/java/TopHandler")
+            "runJava" ->
+              ([jobject, closureType], "evalJava", "base/java/TopHandler")
             _                 ->
-              ([capabilityType, closureType], "evalIO", "base/ghc/TopHandler")
+              ([closureType], "evalIO", "base/ghc/TopHandler")
         (staticMethodClass, methodName)
           | Just camn <- classAndMethodName
           , let (className, methodName) = labelToMethod camn
@@ -665,19 +716,19 @@ dsFExport closureId co externalName classSpec = do
                                             in (spec, className))
                                           classSpec
         (rawClassSpec', className', resType, runClosure)
-          | Just (ioTyCon, resType) <- tcSplitIOType_maybe ioResType
-          = (className, className, resType, "runIO_closure")
+          | Just (_, resType) <- tcSplitIOType_maybe ioResType
+          = (className, className, resType, "runIO")
           | Just (_, javaTagType, javaResType) <- tcSplitJavaType_maybe ioResType
           = ((either (error $ "The tag type should be annotated with a CLASS annotation.")
-               (maybe (if isNothing staticMethodClass
-                       then error $ "No type variables for the Java foreign export!"
-                       else className) id)
+               (maybe className id)
                $ rawTagTypeToText javaTagType)
               , tagTypeToText javaTagType
               , javaResType
-              , "runJava_closure")
-          | otherwise = (className, className, ioResType, "runNonIO_closure")
-          where className = fromJust staticMethodClass
+              , "runJava")
+          | otherwise = (className, className, ioResType, "runNonIO")
+          where className
+                  | Just cls <- staticMethodClass = cls
+                  | otherwise = modClass
 
         numApplied = length argTypes + 1
         apClass = apUpdName numApplied
@@ -727,7 +778,7 @@ genTypeParam :: Type -> TypeParameter TypeVariable
 genTypeParam ty
   | Just tyVar <- getTyVar_maybe ty
   = SimpleTypeParameter (VariableReferenceParameter (sigTyVarText tyVar))
-  | Just (tyCon, tyArgs) <- splitTyConApp_maybe ty
+  | Just (_, tyArgs) <- splitTyConApp_maybe ty
   = SimpleTypeParameter
     (GenericReferenceParameter
       (IClassName (typeClassText ty))
@@ -797,6 +848,7 @@ getPrimTyOf _ = error $ "getPrimTyOf: bad getPrimTyOf"
 dsFWrapper :: Id -> Coercion -> CLabelString -> Bool -> DsM ([Binding], [ClassExport])
 dsFWrapper id co0 target isAbstract = do
   -- TODO: We effectively assume that the coercion is Refl.
+  mod <- getModule
   dflags <- getDynFlags
   (thetaArgs, extendsInfo) <- extendsMap thetaType
   args <- mapM newSysLocalDs argTypes
@@ -805,13 +857,13 @@ dsFWrapper id co0 target isAbstract = do
   classExports' <- mapM (\(i, arg, methodName) ->
                           let argType = exprType arg
                               argCo = mkReflCo Representational argType
-                          in dsFExport (Left i) argCo methodName $ Just classSpec)
+                          in dsFExport (Left i) argCo methodName (Just classSpec) mod)
                   $ zip3 [1..] realArgs methodNames
   javaCallUniq <- newUnique
   let  castBinders = catMaybes mCastBinders
        binding     = mkCoreLams (tvs ++ thetaArgs ++ args) $ foldr ($)
                        (resWrapper javaCallApp) castBinders
-       fcall       = CCall (CCallSpec (StaticTarget (fsLit "@new") Nothing True)
+       fcall       = CCall (CCallSpec (StaticTarget (fsLit "@new") Nothing False)
                             JavaCallConv PlayRisky)
        fcall'      = genJavaFCall fcall extendsInfo argTypes (Left (ObjectRep genClassName))
                                   resType

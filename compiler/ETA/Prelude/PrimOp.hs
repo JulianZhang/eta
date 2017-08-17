@@ -541,7 +541,6 @@ data PrimOp
    | ClassCastOp
    | ObjectArrayNewOp
    | ArrayLengthOp
-   | GetClassOp
    | IsNullObjectOp
    | Int2JByteOp
    | JShort2IntOp
@@ -570,13 +569,15 @@ data PrimOp
    | NewJDoubleArrayOp
    | ReadJDoubleArrayOp
    | WriteJDoubleArrayOp
+   | Addr2Int64Op
+   | Int642AddrOp
 
 -- Used for the Ord instance
 primOpTag :: PrimOp -> Int
 primOpTag op = iBox (tagOf_PrimOp op)
 
 maxPrimOpTag :: Int
-maxPrimOpTag = 1136
+maxPrimOpTag = 1138
 tagOf_PrimOp :: PrimOp -> FastInt
 tagOf_PrimOp CharGtOp = _ILIT(1)
 tagOf_PrimOp CharGeOp = _ILIT(2)
@@ -1685,7 +1686,7 @@ tagOf_PrimOp Int2JBoolOp = _ILIT(1103)
 tagOf_PrimOp ClassCastOp = _ILIT(1104)
 tagOf_PrimOp ObjectArrayNewOp = _ILIT(1105)
 tagOf_PrimOp ArrayLengthOp = _ILIT(1106)
-tagOf_PrimOp GetClassOp = _ILIT(1107)
+-- 1107 is FREE
 tagOf_PrimOp IsNullObjectOp = _ILIT(1108)
 tagOf_PrimOp GetSizeofMutableByteArrayOp = _ILIT(1109)
 tagOf_PrimOp Int2JByteOp = _ILIT(1110)
@@ -1715,6 +1716,8 @@ tagOf_PrimOp WriteJFloatArrayOp = _ILIT(1133)
 tagOf_PrimOp NewJDoubleArrayOp = _ILIT(1134)
 tagOf_PrimOp ReadJDoubleArrayOp = _ILIT(1135)
 tagOf_PrimOp WriteJDoubleArrayOp = _ILIT(1136)
+tagOf_PrimOp Addr2Int64Op = _ILIT(1137)
+tagOf_PrimOp Int642AddrOp = _ILIT(1138)
 
 instance Eq PrimOp where
     op1 == op2 = tagOf_PrimOp op1 ==# tagOf_PrimOp op2
@@ -2847,7 +2850,6 @@ allThePrimOps =
    , ClassCastOp
    , ObjectArrayNewOp
    , ArrayLengthOp
-   , GetClassOp
    , IsNullObjectOp
    , Int2JByteOp
    , JShort2IntOp
@@ -2876,6 +2878,8 @@ allThePrimOps =
    , NewJDoubleArrayOp
    , ReadJDoubleArrayOp
    , WriteJDoubleArrayOp
+   , Addr2Int64Op
+   , Int642AddrOp
    ]
 
 tagToEnumKey :: Unique
@@ -3345,8 +3349,8 @@ primOpInfo TryReadMVarOp = mkGenPrimOp (fsLit "tryReadMVar#")  [deltaTyVar, alph
 primOpInfo SameMVarOp = mkGenPrimOp (fsLit "sameMVar#")  [deltaTyVar, alphaTyVar] [mkMVarPrimTy deltaTy alphaTy, mkMVarPrimTy deltaTy alphaTy] (intPrimTy)
 primOpInfo IsEmptyMVarOp = mkGenPrimOp (fsLit "isEmptyMVar#")  [deltaTyVar, alphaTyVar] [mkMVarPrimTy deltaTy alphaTy, mkStatePrimTy deltaTy] ((mkTupleTy UnboxedTuple [mkStatePrimTy deltaTy, intPrimTy]))
 primOpInfo DelayOp = mkGenPrimOp (fsLit "delay#")  [deltaTyVar] [intPrimTy, mkStatePrimTy deltaTy] (mkStatePrimTy deltaTy)
-primOpInfo WaitReadOp = mkGenPrimOp (fsLit "waitRead#")  [deltaTyVar] [intPrimTy, mkStatePrimTy deltaTy] (mkStatePrimTy deltaTy)
-primOpInfo WaitWriteOp = mkGenPrimOp (fsLit "waitWrite#")  [deltaTyVar] [intPrimTy, mkStatePrimTy deltaTy] (mkStatePrimTy deltaTy)
+primOpInfo WaitReadOp = mkGenPrimOp (fsLit "waitRead#")  [alphaTyVar, deltaTyVar] [mkObjectPrimTy alphaTy, mkStatePrimTy deltaTy] (mkStatePrimTy deltaTy)
+primOpInfo WaitWriteOp = mkGenPrimOp (fsLit "waitWrite#")  [alphaTyVar, deltaTyVar] [mkObjectPrimTy alphaTy, mkStatePrimTy deltaTy] (mkStatePrimTy deltaTy)
 primOpInfo ForkOp = mkGenPrimOp (fsLit "fork#")  [alphaTyVar] [alphaTy, mkStatePrimTy realWorldTy] ((mkTupleTy UnboxedTuple [mkStatePrimTy realWorldTy, threadIdPrimTy]))
 primOpInfo ForkOnOp = mkGenPrimOp (fsLit "forkOn#")  [alphaTyVar] [intPrimTy, alphaTy, mkStatePrimTy realWorldTy] ((mkTupleTy UnboxedTuple [mkStatePrimTy realWorldTy, threadIdPrimTy]))
 primOpInfo KillThreadOp = mkGenPrimOp (fsLit "killThread#")  [alphaTyVar] [threadIdPrimTy, alphaTy, mkStatePrimTy realWorldTy] (mkStatePrimTy realWorldTy)
@@ -4130,15 +4134,12 @@ primOpInfo Int2JBoolOp = mkGenPrimOp (fsLit "int2jbool#")  [] [intPrimTy] jbyteP
 primOpInfo ClassCastOp = mkGenPrimOp (fsLit "classCast#") [alphaTyVar, betaTyVar]
                                      [ mkObjectPrimTy alphaTy ] (mkObjectPrimTy betaTy)
 primOpInfo ObjectArrayNewOp =
-  mkGenPrimOp (fsLit "jobjectArrayNew#") [alphaTyVar, betaTyVar, gammaTyVar]
-  [ intPrimTy, mkStatePrimTy gammaTy ]
+  mkGenPrimOp (fsLit "jobjectArrayNew#") [alphaTyVar, betaTyVar, gammaTyVar, deltaTyVar]
+  [ intPrimTy, mkObjectPrimTy deltaTy, mkStatePrimTy gammaTy ]
   $ mkTupleTy UnboxedTuple [mkStatePrimTy gammaTy, mkObjectPrimTy betaTy]
 primOpInfo ArrayLengthOp =
   mkGenPrimOp (fsLit "alength#") [alphaTyVar]
   [ mkObjectPrimTy alphaTy ] intPrimTy
-primOpInfo GetClassOp =
-  mkGenPrimOp (fsLit "getClass#") [alphaTyVar, betaTyVar]
-  [ mkProxyPrimTy liftedTypeKind alphaTy ] (mkObjectPrimTy betaTy)
 primOpInfo IsNullObjectOp = mkGenPrimOp (fsLit "isNullObject#")  [alphaTyVar] [(mkObjectPrimTy alphaTy)] intPrimTy
 primOpInfo Int2JByteOp = mkGenPrimOp (fsLit "int2jbyte#")  [] [intPrimTy] jbytePrimTy
 primOpInfo JShort2IntOp = mkGenPrimOp (fsLit "jshort2int#")  [] [jshortPrimTy] intPrimTy
@@ -4233,6 +4234,8 @@ primOpInfo WriteJDoubleArrayOp =
   mkGenPrimOp (fsLit "writeJDoubleArray#") [alphaTyVar, betaTyVar]
   [ mkObjectPrimTy alphaTy, intPrimTy, doublePrimTy, mkStatePrimTy betaTy ]
   $ mkStatePrimTy betaTy
+primOpInfo Addr2Int64Op = mkGenPrimOp (fsLit "addr2Int64#")  [] [addrPrimTy] (int64PrimTy)
+primOpInfo Int642AddrOp = mkGenPrimOp (fsLit "int642Addr#")  [] [int64PrimTy] (addrPrimTy)
 
 
 {-
@@ -5155,6 +5158,8 @@ primOpCodeSize CopyAddrToByteArrayOp =  primOpCodeSizeForeignCall + 4
 primOpCodeSize SetByteArrayOp =  primOpCodeSizeForeignCall + 4
 primOpCodeSize Addr2IntOp = 0
 primOpCodeSize Int2AddrOp = 0
+primOpCodeSize Addr2Int64Op = 0
+primOpCodeSize Int642AddrOp = 0
 primOpCodeSize WriteMutVarOp =  primOpCodeSizeForeignCall
 primOpCodeSize TouchOp =  0
 primOpCodeSize ParOp =  primOpCodeSizeForeignCall

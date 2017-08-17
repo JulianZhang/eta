@@ -1017,8 +1017,11 @@ General Syntax
    foreign export java "[export-string]" [eta-identifier]
      :: [arg-type-1] -> [arg-type-2] -> .. -> Java [export-jwt] [return-type]
 
-#. ``[export-string]`` should be an unqualified Java instance method name that
-   is the exported function should be referred to in the Java world.
+#. ``[export-string]`` should consist of ``@static`` followed by a fully qualified
+   Java class name with the name of the static method appended to it with a dot. This
+   is the method name that the exported function should be referred to in the Java
+   world. (e.g. ``"@static com.org.SomeClass.someMethodName"``)
+
 
 #. ``[eta-identifier]`` should be a valid Eta identifier for an *existing*
    Eta function that is the target of the export.
@@ -1036,21 +1039,15 @@ Example
 
 Here is an example::
 
-  data {-# CLASS "eta.example.MyExportedClass" #-} MyExportedClass
-    = MyExportedClass (Object# MyExportedClass)
-    deriving Class
+  fib 0 = 1
+  fib 1 = 1
+  fib n = fib (n - 1) + fib (n - 2)
 
-  fib' 0 = 1
-  fib' 1 = 1
-  fib' n = fib' (n - 1) + fib' (n - 2)
-
-  fib :: Int -> Java MyExportedClass Int
-  fib n = return $ fib' n
-
-  foreign export java fib :: Int -> Java MyExportedClass Int
+  foreign export java "@static eta.example.MyExportedClass.fib"
+    fib :: Int -> Int
 
 This creates a class called ``eta.example.MyExportedClass`` with a default
-constructor and single instance method ``fib``.
+constructor and static method ``int fib(int)``.
 
 Setting Up The Project
 """"""""""""""""""""""
@@ -1062,22 +1059,12 @@ changes:
 
    .. code::
 
-      {-# LANGUAGE MagicHash #-}
+      fib 0 = 1
+      fib 1 = 1
+      fib n = fib (n - 1) + fib (n - 2)
 
-      import Java
-
-      data {-# CLASS "eta.example.MyExportedClass" #-} MyExportedClass
-        = MyExportedClass (Object# MyExportedClass)
-        deriving Class
-
-      fib' 0 = 1
-      fib' 1 = 1
-      fib' n = fib' (n - 1) + fib' (n - 2)
-
-      fib :: Int -> Java MyExportedClass Int
-      fib n = return $ fib' n
-
-      foreign export java fib :: Int -> Java MyExportedClass Int
+      foreign export java "@static eta.example.MyExportedClass.fib"
+        fib :: Int -> Int
 
       main :: IO ()
       main = return ()
@@ -1109,8 +1096,7 @@ import from Java like this:
 
    public class Main {
      public static void main(String[] args) {
-       MyExportedClass mec = new MyExportedClass();
-       System.out.println("fib(1000): " + mec.fib(1000));
+       System.out.println("fib(1000): " + MyExportedClass.fib(1000));
      }
    }
 
@@ -1128,8 +1114,7 @@ import from Scala like this:
 
     object EtaExports {
       def main(args: Array[String]) {
-        val mec = new MyExportedClass
-        val fib = mec.fib(1000)
+        val fib = MyExportedClass.fib(1000)
         println(s"fib(1000): $fib")
       }
     }
@@ -1146,8 +1131,7 @@ import from Clojure like this:
         (:import [eta.example MyExportedClass]))
 
     (defn -main []
-      (let [mec (MyExportedClass.)]
-        (println (str "fib(1000): " (.fib mec 1000)))))
+      (println (str "fib(1000): " (MyExportedClass/fib 1000))))
 
 Add Java Files to Your Project
 ------------------------------
@@ -1328,6 +1312,111 @@ changes:
         shutdownUnirest
 
 #. That's it! Run the example with ``etlas run``.
+
+More examples
+-------------
+
+Let us look at some more examples of exporting Eta methods to Java.
+
+Example 1
+^^^^^^^^^
+
+In this example we are going to export the `Pipes <https://hackage.haskell.org/package/pipes>`_ library. Pipes 
+is a powerful stream processing library in Haskell. Let us go ahead and start with creating an ``etlas`` project.
+
+.. code-block:: console
+
+      mkdir pipes-test
+      cd pipes-test
+      etlas init
+
+The project structure should look like this sfter you select the basic options:
+
+.. code-block:: console
+
+      pipes-test/
+      |--src/
+      |----Main.hs
+      |--ChangeLog.md
+      |--LICENSE
+      |--pipes-test.cabal
+      |--Setup.hs
+
+Now modify the ``pipes-test.cabal`` file to include ``pipes`` in the ``build-depends:`` section. Followed by that run
+``etlas build``. Now let us modify the ``Main.hs`` file to use ``Pipes`` to take an input from a stream and and output
+each input to the output stream. We will try to restrict the program to take a maximum of 3 inputs from the input stream:
+
+.. code::
+
+   {-# LANGUAGE MagicHash,ScopedTypeVariables #-}
+   module Main where
+   import Java
+   import Pipes
+   import Control.Monad (replicateM_)
+   import qualified Pipes.Prelude as P
+   import System.IO
+
+   take ::  Int -> Pipe a a IO ()
+   take n = do
+    replicateM_ n $ do
+        x <- await
+        yield x
+    lift $ putStrLn "You shall not pass!"
+
+   maxInput :: Int -> Producer String IO ()
+   maxInput n = P.stdinLn >-> Main.take n
+
+   main :: IO ()
+   main = do
+    hSetBuffering stdin LineBuffering
+    hSetBuffering stdout LineBuffering
+    runEffect $ maxInput 3 >-> P.stdoutLn
+
+
+   foreign export java "@static com.typelead.Util.test" main :: IO ()
+
+Here we have delegated the input and output to Eta side and are exporting the entire main method to Java. The line `hSetBuffering stdin LineBuffering` is optional. It establishes the whole point of ``Pipes`` by not holding the input in memory.
+Now let us build the uber jar for this:
+
+.. code-block:: console
+
+      etlas clean
+      etlas configure --enable-uberjar-mode
+
+This should create the uber jar buried somewher inside the ``dist`` folder. Now let us test this jar by actually
+creating a Java file and using an exported method. We can create the Java source file in the root of the project
+itself. We shall call it ``Test.java``
+
+.. code-block:: java
+
+      package eta.first;
+
+      import com.typelead.Util;
+
+      public class Test {
+      public static void main (String args []){
+        Util x = new Util();
+        x.test();
+        }
+      }
+
+.. note::
+
+   The package name is intentionally left blank. If you go ahead and use a package name like
+   ``com.typelead.test``, you have to create a directory structure like the same, as it is a prevalent practise in Java.
+
+Now let us try to run this. Assuming that you are still at the root of the project run this:
+
+.. code-block:: console
+
+      javac -cp ":/<your absolute file path here>/pipes-test/dist/build/pipes-test/pipes-test.jar" Test.java
+      java -cp ".:/<your absolute file path here>/pipes-test/dist/build/pipes-test/pipes-test.jar" Test
+
+You will get the console waiting for input. The moment you type something ad press Enter, it consumes that 
+and emits that into the output stream, one at a time. After the third input it will say "You shall not pass!"
+and terminates the program. So through this example we were not only able to delegate the entire library from 
+Eta, but also the input and output parts too.
+
 
 Contact Us
 ----------

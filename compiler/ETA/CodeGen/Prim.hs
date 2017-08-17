@@ -22,14 +22,10 @@ import ETA.CodeGen.Name
 
 import ETA.Debug
 
-
-
 import Data.Monoid ((<>))
 import Data.Foldable (fold)
 
 import Data.Text (Text)
-
-import qualified Data.Text as T
 
 cgOpApp :: StgOp
         -> [StgArg]
@@ -47,44 +43,34 @@ cgOpApp (StgPrimOp TagToEnumOp) args@[_arg] resType = do
   where tyCon = tyConAppTyCon resType
 
 cgOpApp (StgPrimOp ObjectArrayNewOp) args resType = do
-  [nCode] <- getNonVoidArgCodes args
-  emitReturn [mkLocDirect False (arrayFt, nCode <> new arrayFt)]
-  where arrayFt
-          | arrayFt' == jobject = jarray jobject
-          | otherwise =  arrayFt'
-          where arrayFt' = fromJust
-                         . repFieldType_maybe
-                         . head . tail . snd
-                         $ splitTyConApp resType
-
-cgOpApp (StgPrimOp GetClassOp) [_arg] resType = do
-  -- TODO: Support array types
-  emitReturn [mkLocDirect False
-              ( clasFt
-              , sconst objText
-             <> invokestatic (mkMethodRef clas "forName" [jstring] (ret clasFt)))]
-  where --proxyTy  = stgArgType arg
-        objTy    = maybe Nothing (Just . head . snd)
-                 . splitTyConApp_maybe
-                 . head . snd . splitTyConApp
-                 $ resType
-        objText  = maybe
-                     "java.lang.Object"
-                     ( T.map (\c -> if c == '/' then '.' else c)
-                     . tagTypeToText)
-                     objTy
-        clas = "java/lang/Class"
-        clasFt = obj clas
+  [nCode, classCode] <- getNonVoidArgCodes args
+  let code
+        | arrayFt == jobject =
+             classCode
+          <> nCode
+          <> invokestatic (mkMethodRef "java/lang/reflect/Array" "newInstance"
+                           [classFt, jint] (ret jobject))
+        | otherwise = nCode <> new arrayFt
+  emitReturn [mkLocDirect False (arrayFt, code)]
+  -- If there's enough type information, generate efficient, specialized code.
+  -- If not, use reflection to generate the instance.
+  where arrayFt = fromJust
+                . repFieldType_maybe
+                . head . tail . snd
+                $ splitTyConApp resType
 
 cgOpApp (StgPrimOp primOp) args resType = do
     dflags <- getDynFlags
     argCodes <- getNonVoidArgFtCodes args
     case shouldInlinePrimOp dflags primOp argCodes resType of
-      Left primOpLoc -> do
-        args' <- getRepFtCodes args
-        withContinuation $ do
-          emit $ mkCallExit True args'
-              <> mkRtsFunCall primOpLoc
+      Left (rtsGroup, rtsFunName) -> do
+        loadArgs <- getNonVoidArgCodes args
+        let (_, argTypes, _, _, _) = primOpSig primOp
+            fts                    = repFieldTypes argTypes
+        withContinuation $ loadContext
+                        <> fold loadArgs
+                        <> invokestatic (mkMethodRef rtsGroup rtsFunName
+                                         (contextType:fts) (ret closureType))
 
       -- TODO: Optimize: Remove the intermediate temp locations
       --       and allow direct code locations
@@ -113,17 +99,13 @@ cgOpApp (StgPrimOp primOp) args resType = do
         | otherwise -> panic "cgPrimOp"
         where resultInfo = getPrimOpResultInfo primOp
 
-cgOpApp (StgPrimCallOp (PrimCall label _)) args _resType =
-  withContinuation $ do
-    argsFtCodes <- getNonVoidArgFtCodes args
-    let (argFts, callArgs) = unzip argsFtCodes
-    emit $ loadContext
-        <> fold callArgs
-        <> invokestatic (mkMethodRef clsName methodName (contextType:argFts) void)
-  -- sequel <- getSequel
-  -- case sequel of
-  --   AssignTo targetLocs -> emit $ mkReturnEntry targetLocs
-  --   _ -> return ()
+cgOpApp (StgPrimCallOp (PrimCall label _)) args _resType = do
+  argsFtCodes <- getNonVoidArgFtCodes args
+  let (argFts, callArgs) = unzip argsFtCodes
+  withContinuation $ loadContext
+                  <> fold callArgs
+                  <> invokestatic (mkMethodRef clsName methodName
+                                   (contextType:argFts) (ret closureType))
   where (clsName, methodName) = labelToMethod (unpackFS label)
 
 inlinePrimCall :: String -> [(FieldType, Code)] -> Code
@@ -296,7 +278,7 @@ shouldInlinePrimOp' _ NewSmallArrayOp args = Right $ return
 shouldInlinePrimOp' _ NewArrayArrayOp args = Right $ return
   [
     fold args
- <> invokestatic (mkMethodRef stgArray "create" [jint, closureType] (ret stgArrayType))
+ <> invokestatic (mkMethodRef stgArray "createArrayArray" [jint] (ret stgArrayType))
   ]
 
 shouldInlinePrimOp' _ NewMutVarOp args = Right $ return
@@ -352,7 +334,7 @@ shouldInlinePrimOp' _ primOp args
 mkRtsPrimOp :: PrimOp -> (Text, Text)
 mkRtsPrimOp RaiseOp                 = (stgExceptionGroup, "raise")
 mkRtsPrimOp CatchOp                 = (stgExceptionGroup, "catch_")
-mkRtsPrimOp RaiseIOOp               = (stgExceptionGroup, "raiseIO")
+mkRtsPrimOp RaiseIOOp               = (stgExceptionGroup, "raise")
 mkRtsPrimOp MaskAsyncExceptionsOp   = (stgExceptionGroup, "maskAsyncExceptions")
 mkRtsPrimOp MaskUninterruptibleOp   = (stgExceptionGroup, "maskUninterruptible")
 mkRtsPrimOp UnmaskAsyncExceptionsOp = (stgExceptionGroup, "unmaskAsyncExceptions")
@@ -381,15 +363,18 @@ mkRtsPrimOp IsCurrentThreadBoundOp  = (concGroup, "isCurrentThreadBound")
 mkRtsPrimOp NoDuplicateOp           = (stgGroup, "noDuplicate")
 mkRtsPrimOp ThreadStatusOp          = (concGroup, "threadStatus")
 mkRtsPrimOp MkWeakOp                = (stgGroup, "mkWeak")
-mkRtsPrimOp MkWeakNoFinalizerOp     = (stgGroup, "mkWeakNoFinalizzer")
-mkRtsPrimOp AddCFinalizerToWeakOp   = (stgGroup, "addJavaFinalizzerToWeak")
+mkRtsPrimOp MkWeakNoFinalizerOp     = (stgGroup, "mkWeakNoFinalizer")
+mkRtsPrimOp AddCFinalizerToWeakOp   = (stgGroup, "addJavaFinalizerToWeak")
 mkRtsPrimOp DeRefWeakOp             = (stgGroup, "deRefWeak")
-mkRtsPrimOp FinalizeWeakOp          = (stgGroup, "finalizzeWeak")
+mkRtsPrimOp FinalizeWeakOp          = (stgGroup, "finalizeWeak")
 mkRtsPrimOp AtomicModifyMutVarOp    = (ioGroup, "atomicModifyMutVar")
 mkRtsPrimOp CasMutVarOp             = (ioGroup, "casMutVar")
 mkRtsPrimOp GetSparkOp              = (parGroup, "getSpark")
 mkRtsPrimOp NumSparks               = (parGroup, "numSparks")
 mkRtsPrimOp NewBCOOp                = (interpGroup, "newBCO")
+mkRtsPrimOp TraceEventOp            = (concGroup, "traceEvent")
+mkRtsPrimOp WaitWriteOp             = (concGroup, "waitWrite")
+mkRtsPrimOp WaitReadOp              = (concGroup, "waitRead")
 mkRtsPrimOp primop = pprPanic "mkRtsPrimOp: unimplemented!" (ppr primop)
 
 cgPrimOp   :: PrimOp            -- the op
@@ -404,13 +389,6 @@ cgPrimOp op args = do
 --            -> [Code]         -- arguments
 --            -> CodeGen ()
 emitPrimOp :: PrimOp -> [Code] -> CodeGen [Code]
-emitPrimOp IndexOffAddrOp_Char [arg1, arg2]
-  = return [ arg1
-          <> arg2
-          <> invokevirtual (mkMethodRef jstringC "charAt"
-                                        [jint] (ret jchar))]
-          -- TODO: You may have to cast to int or do some extra stuff here
-          --       or maybe instead reference the direct byte array
 emitPrimOp DataToTagOp [arg] = return [ getTagMethod arg <> iconst jint 1 <> isub ]
 
 emitPrimOp IntQuotRemOp args = do
@@ -585,9 +563,7 @@ simpleOp IndexByteArrayOp_Char = Just $ byteArrayIndexOp jbyte preserveByte
 simpleOp IndexByteArrayOp_WideChar = Just $ byteArrayIndexOp jint mempty
 simpleOp IndexByteArrayOp_Int = Just $ byteArrayIndexOp jint mempty
 simpleOp IndexByteArrayOp_Word = Just $ byteArrayIndexOp jint mempty
-simpleOp IndexByteArrayOp_Addr = Just $ byteArrayIndexOp jint
-  (invokestatic $
-    mkMethodRef memoryManager "getBuffer" [jint] (ret byteBufferType))
+simpleOp IndexByteArrayOp_Addr = Just $ byteArrayIndexOp jlong mempty
 simpleOp IndexByteArrayOp_Float = Just $ byteArrayIndexOp jfloat mempty
 simpleOp IndexByteArrayOp_Double = Just $ byteArrayIndexOp jdouble mempty
 simpleOp IndexByteArrayOp_StablePtr = Just $ byteArrayIndexOp jint mempty
@@ -604,9 +580,7 @@ simpleOp ReadByteArrayOp_Char = Just $ byteArrayIndexOp jbyte preserveByte
 simpleOp ReadByteArrayOp_WideChar = Just $ byteArrayIndexOp jint mempty
 simpleOp ReadByteArrayOp_Int = Just $ byteArrayIndexOp jint mempty
 simpleOp ReadByteArrayOp_Word = Just $ byteArrayIndexOp jint mempty
-simpleOp ReadByteArrayOp_Addr = Just $ byteArrayIndexOp jint
-  (invokestatic $
-    mkMethodRef memoryManager "getBuffer" [jint] (ret byteBufferType))
+simpleOp ReadByteArrayOp_Addr = Just $ byteArrayIndexOp jlong mempty
 simpleOp ReadByteArrayOp_Float = Just $ byteArrayIndexOp jfloat mempty
 simpleOp ReadByteArrayOp_Double = Just $ byteArrayIndexOp jdouble mempty
 simpleOp ReadByteArrayOp_StablePtr = Just $ byteArrayIndexOp jint mempty
@@ -623,9 +597,7 @@ simpleOp WriteByteArrayOp_Char = Just $ byteArrayWriteOp jbyte mempty
 simpleOp WriteByteArrayOp_WideChar = Just $ byteArrayWriteOp jint mempty
 simpleOp WriteByteArrayOp_Int = Just $ byteArrayWriteOp jint mempty
 simpleOp WriteByteArrayOp_Word = Just $ byteArrayWriteOp jint mempty
-simpleOp WriteByteArrayOp_Addr = Just $ byteArrayWriteOp jint
-  (invokestatic $
-     mkMethodRef memoryManager "getAddress" [byteBufferType] (ret jint))
+simpleOp WriteByteArrayOp_Addr = Just $ byteArrayWriteOp jlong mempty
 simpleOp WriteByteArrayOp_Float = Just $ byteArrayWriteOp jfloat mempty
 simpleOp WriteByteArrayOp_Double = Just $ byteArrayWriteOp jdouble mempty
 -- TODO: Verify writes for Word/Int 8/16 - add additional casts?
@@ -867,44 +839,36 @@ simpleOp Int2JShortOp = Just $ normalOp $ gconv jint jshort
 simpleOp JChar2WordOp = Just $ normalOp preserveShort
 simpleOp Word2JCharOp = Just $ normalOp $ gconv jint jchar
 
--- StgMutVar ops
+-- MutVar ops
 simpleOp ReadMutVarOp = Just $ normalOp mutVarValue
 simpleOp WriteMutVarOp = Just $ normalOp mutVarSetValue
 simpleOp SameMutVarOp = Just $ intCompOp if_acmpeq
 
 -- Addr# ops
--- TODO: Inline these primops
-simpleOp Addr2IntOp = Just $ normalOp
-  $ invokestatic $ mkMethodRef memoryManager "getAddress" [byteBufferType] (ret jint)
-simpleOp Int2AddrOp = Just $ normalOp
-  $ invokestatic $ mkMethodRef memoryManager "getBuffer" [jint] (ret byteBufferType)
-simpleOp AddrAddOp = Just $ \[addr, dx] ->
-     addr
-  <> byteBufferDup
-  <> addr
-  <> byteBufferPosGet
-  <> dx
-  <> iadd
-  <> byteBufferPosSet
-  <> gconv bufferType byteBufferType
-simpleOp AddrSubOp = Just $ \[addr1, addr2] ->
-  addr1 <> byteBufferPosGet <> addr2 <> byteBufferPosGet <> isub
+-- WARNING: Addr2IntOp and Int2AddrOp are unsafe in the sense that allocating more
+--          than 2GB will disable this from being addressable.
+simpleOp Addr2IntOp = Just $ normalOp $ gconv jlong jint
+simpleOp Int2AddrOp = Just $ normalOp $ gconv jint  jlong
+simpleOp Addr2Int64Op = Just idOp
+simpleOp Int642AddrOp = Just idOp
+simpleOp AddrAddOp = Just $ \[addr, n] ->
+  addr <> n <> gconv jint jlong <> ladd
+simpleOp AddrSubOp = Just $ normalOp (lsub <> gconv jlong jint)
+-- TODO: Is this the right implementation?
 simpleOp AddrRemOp = Just $ \[addr, n] ->
-  addr <> byteBufferPosGet <> n <> irem
-simpleOp AddrGtOp = Just $ addrCmpOp if_icmpgt
-simpleOp AddrGeOp = Just $ addrCmpOp if_icmpge
-simpleOp AddrEqOp = Just $ addrCmpOp if_icmpeq
-simpleOp AddrNeOp = Just $ addrCmpOp if_icmpne
-simpleOp AddrLtOp = Just $ addrCmpOp if_icmplt
-simpleOp AddrLeOp = Just $ addrCmpOp if_icmple
+  addr <> gconv jlong jint <> n <> irem
+simpleOp AddrGtOp = Just $ typedCmp jlong ifgt
+simpleOp AddrGeOp = Just $ typedCmp jlong ifge
+simpleOp AddrEqOp = Just $ typedCmp jlong ifeq
+simpleOp AddrNeOp = Just $ typedCmp jlong ifne
+simpleOp AddrLtOp = Just $ typedCmp jlong iflt
+simpleOp AddrLeOp = Just $ typedCmp jlong ifle
 
 simpleOp IndexOffAddrOp_Char = Just $ addrIndexOp jbyte preserveByte
 simpleOp IndexOffAddrOp_WideChar = Just $ addrIndexOp jint mempty
 simpleOp IndexOffAddrOp_Int = Just $ addrIndexOp jint mempty
 simpleOp IndexOffAddrOp_Word = Just $ addrIndexOp jint mempty
-simpleOp IndexOffAddrOp_Addr = Just $ addrIndexOp jint
-  (invokestatic $
-    mkMethodRef memoryManager "getBuffer" [jint] (ret byteBufferType))
+simpleOp IndexOffAddrOp_Addr = Just $ addrIndexOp jlong mempty
 simpleOp IndexOffAddrOp_Float = Just $ addrIndexOp jfloat mempty
 simpleOp IndexOffAddrOp_Double = Just $ addrIndexOp jdouble mempty
 simpleOp IndexOffAddrOp_StablePtr = Just $ addrIndexOp jint mempty
@@ -921,9 +885,7 @@ simpleOp ReadOffAddrOp_Char = Just $ addrIndexOp jbyte preserveByte
 simpleOp ReadOffAddrOp_WideChar = Just $ addrIndexOp jint mempty
 simpleOp ReadOffAddrOp_Int = Just $ addrIndexOp jint mempty
 simpleOp ReadOffAddrOp_Word = Just $ addrIndexOp jint mempty
-simpleOp ReadOffAddrOp_Addr = Just $ addrIndexOp jint
-  (invokestatic $
-    mkMethodRef memoryManager "getBuffer" [jint] (ret byteBufferType))
+simpleOp ReadOffAddrOp_Addr = Just $ addrIndexOp jlong mempty
 simpleOp ReadOffAddrOp_Float = Just $ addrIndexOp jfloat mempty
 simpleOp ReadOffAddrOp_Double = Just $ addrIndexOp jdouble mempty
 simpleOp ReadOffAddrOp_StablePtr = Just $ addrIndexOp jint mempty
@@ -940,9 +902,7 @@ simpleOp WriteOffAddrOp_Char = Just $ addrWriteOp jbyte mempty
 simpleOp WriteOffAddrOp_WideChar = Just $ addrWriteOp jint mempty
 simpleOp WriteOffAddrOp_Int = Just $ addrWriteOp jint mempty
 simpleOp WriteOffAddrOp_Word = Just $ addrWriteOp jint mempty
-simpleOp WriteOffAddrOp_Addr = Just $ addrWriteOp jint
-  (invokestatic $
-     mkMethodRef memoryManager "getAddress" [byteBufferType] (ret jint))
+simpleOp WriteOffAddrOp_Addr = Just $ addrWriteOp jlong mempty
 simpleOp WriteOffAddrOp_Float = Just $ addrWriteOp jfloat mempty
 simpleOp WriteOffAddrOp_Double = Just $ addrWriteOp jdouble mempty
 -- TODO: Verify writes for Word/Int 8/16 - add additional casts?
@@ -976,30 +936,24 @@ simpleOp StableNameToIntOp      = Just idOp
 simpleOp TouchOp                = Just $ const mempty
 simpleOp CopyAddrToByteArrayOp = Just $ normalOp $
   invokestatic $ mkMethodRef stgByteArray "copyAddrToByteArray"
-                   [byteBufferType, stgByteArrayType, jint, jint] void
+                   [jlong, stgByteArrayType, jint, jint] void
 simpleOp CopyMutableByteArrayToAddrOp = Just $ normalOp $
   invokestatic $ mkMethodRef stgByteArray "copyByteArrayToAddr"
-                   [stgByteArrayType, jint, byteBufferType, jint] void
+                   [stgByteArrayType, jint, jlong, jint] void
 simpleOp CopyByteArrayToAddrOp = Just $ normalOp $
   invokestatic $ mkMethodRef stgByteArray "copyByteArrayToAddr"
-                   [stgByteArrayType, jint, byteBufferType, jint] void
+                   [stgByteArrayType, jint, jlong, jint] void
 simpleOp CopyByteArrayOp = Just $ normalOp $
   invokestatic $ mkMethodRef stgByteArray "copyByteArray"
                    [stgByteArrayType, jint, stgByteArrayType, jint, jint] void
 simpleOp CopyMutableByteArrayOp = Just $ normalOp $
   invokestatic $ mkMethodRef stgByteArray "copyByteArray"
                    [stgByteArrayType, jint, stgByteArrayType, jint, jint] void
-simpleOp StablePtr2AddrOp = Just $ normalOp $
-  invokestatic $ mkMethodRef "eta/runtime/stg/StablePtrTable" "stablePtr2Addr"
-                   [jint] (ret byteBufferType)
-simpleOp Addr2StablePtrOp = Just $ normalOp $
-  invokevirtual $ mkMethodRef byteBuffer "getInt" [] (ret jint)
-simpleOp SizeofMutableByteArrayOp = Just $ normalOp $
-  invokevirtual $ mkMethodRef stgByteArray "remaining" [] (ret jint)
-simpleOp GetSizeofMutableByteArrayOp = Just $ normalOp $
-  invokevirtual $ mkMethodRef stgByteArray "remaining" [] (ret jint)
-simpleOp SizeofByteArrayOp = Just $ normalOp $
-  invokevirtual $ mkMethodRef stgByteArray "remaining" [] (ret jint)
+simpleOp StablePtr2AddrOp = Just $ normalOp $ gconv jint jlong
+simpleOp Addr2StablePtrOp = Just $ normalOp $ gconv jlong jint
+simpleOp SizeofMutableByteArrayOp = Just $ normalOp byteArraySize
+simpleOp GetSizeofMutableByteArrayOp = Just $ normalOp byteArraySize
+simpleOp SizeofByteArrayOp = Just $ normalOp byteArraySize
 
 -- Sparks
 -- TODO: Implement
@@ -1014,9 +968,6 @@ popCntOp = invokestatic $ mkMethodRef "java/lang/Integer" "bitCount" [jint] (ret
 clzOp = invokestatic $ mkMethodRef "java/lang/Integer" "numberOfLeadingZeros" [jint] (ret jint)
 ctzOp = invokestatic $ mkMethodRef "java/lang/Integer" "numberOfTrailingZeros" [jint] (ret jint)
 
-addrCmpOp :: (Code -> Code -> Code) -> [Code] -> Code
-addrCmpOp op args = intCompOp op (map (<> byteBufferAddrGet) args)
-
 floatMathEndoOp :: Text -> Code
 floatMathEndoOp f = gconv jfloat jdouble <> doubleMathEndoOp f <> gconv jdouble jfloat
 
@@ -1029,31 +980,33 @@ doubleMathOp f args ret = invokestatic $ mkMethodRef "java/lang/Math" f args (Ju
 doubleMathEndoOp :: Text -> Code
 doubleMathEndoOp f = doubleMathOp f [jdouble] jdouble
 
+indexMultiplier :: FieldType -> Code
+indexMultiplier ft
+  | size == 1 = mempty
+  | otherwise = iconst jint (fromIntegral size)
+             <> imul
+  where size = fieldByteSize ft
+
 addrIndexOp :: FieldType -> Code -> [Code] -> Code
 addrIndexOp ft resCode = \[this, ix] ->
      this
-  <> dup byteBufferType
-  <> byteBufferPosGet
   <> ix
-  <> iconst jint (fromIntegral (fieldByteSize ft))
-  <> imul
-  <> iadd
-  <> byteBufferGet ft
+  <> indexMultiplier ft
+  <> gconv jint jlong
+  <> ladd
+  <> addressGet ft
   <> resCode
 
 addrWriteOp :: FieldType -> Code -> [Code] -> Code
 addrWriteOp ft argCode = \[this, ix, val] ->
     this
- <> dup byteBufferType
- <> byteBufferPosGet
  <> ix
- <> iconst jint (fromIntegral (fieldByteSize ft))
- <> imul
- <> iadd
+ <> indexMultiplier ft
+ <> gconv jint jlong
+ <> ladd
  <> val
  <> argCode
- <> byteBufferPut ft
- <> pop byteBufferType
+ <> addressPut ft
 
 byteArrayIndexOp :: FieldType -> Code -> [Code] -> Code
 byteArrayIndexOp ft resCode = \[this, ix] ->

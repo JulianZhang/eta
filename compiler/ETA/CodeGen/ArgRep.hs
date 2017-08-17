@@ -30,9 +30,8 @@ import ETA.CodeGen.Rts
 import ETA.Util
 import Codec.JVM
 import Data.Monoid ((<>))
-import Data.Text (Text)
 
-data ArgRep = P   -- StgClosure
+data ArgRep = P   -- Closure
              | N   -- int-sized non-ptr
              | V   -- Void
              | L   -- long
@@ -49,7 +48,7 @@ toArgRep VoidRep           = V
 toArgRep PtrRep            = P
 toArgRep IntRep            = N
 toArgRep WordRep           = N
-toArgRep AddrRep           = O
+toArgRep AddrRep           = L
 toArgRep Int64Rep          = L
 toArgRep Word64Rep         = L
 toArgRep FloatRep          = F
@@ -90,7 +89,7 @@ primRepFieldType_maybe rep = Just $
     PtrRep              -> closureType
     IntRep              -> jint
     WordRep             -> jint
-    AddrRep             -> byteBufferType
+    AddrRep             -> jlong
     Int64Rep            -> jlong
     Word64Rep           -> jlong
     FloatRep            -> jfloat
@@ -114,8 +113,8 @@ repFieldTypes :: [Type] -> [FieldType]
 repFieldTypes = mapMaybe repFieldType_maybe
 
 -- NOTE: Assumes StgContext is in local variable slot 1
-contextLoad :: FieldType -> ArgRep -> Int -> Code
-contextLoad _ argRep n =
+contextLoad :: ArgRep -> Int -> Code
+contextLoad argRep n =
      loadContext
   <> iconst jint (fromIntegral n)
   <> loadMethod
@@ -128,8 +127,8 @@ contextLoad _ argRep n =
           O -> loadO
           _ -> error "contextLoad: V"
 
-contextStore :: FieldType -> ArgRep -> Code -> Int -> Code
-contextStore _ argRep storeCode n =
+contextStore :: ArgRep -> Code -> Int -> Code
+contextStore argRep storeCode n =
      loadContext
   <> iconst jint (fromIntegral n)
   <> storeCode
@@ -143,30 +142,25 @@ contextStore _ argRep storeCode n =
           O -> storeO
           _ -> error "contextStore: V"
 
-slowCallPattern :: [ArgRep] -> (Text, RepArity, [FieldType])
+slowCallPattern :: [ArgRep] -> (RepArity, [FieldType])
 slowCallPattern (P: P: P: P: P: P: _) =
-  ("ap_pppppp", 6, replicate 6 closureType)
+  (6, replicate 6 closureType)
 slowCallPattern (P: P: P: P: P: _)    =
-  ("ap_ppppp", 5, replicate 5 closureType)
-slowCallPattern (P: P: P: V: O: _)    =
-  ("ap_pppvo", 5, replicate 3 closureType ++ [jobject])
-slowCallPattern (P: P: P: P: _)       = ("ap_pppp", 4, replicate 4 closureType)
-slowCallPattern (P: P: P: V: _)       = ("ap_pppv", 4, replicate 3 closureType)
-slowCallPattern (P: P: V: O: _)       =
-  ("ap_ppvo", 4, replicate 2 closureType ++ [jobject])
-slowCallPattern (P: P: P: _)          = ("ap_ppp", 3, replicate 3 closureType)
-slowCallPattern (P: P: V: _)          = ("ap_ppv", 3, replicate 2 closureType)
-slowCallPattern (P: V: O: _)          = ("ap_pvo", 3, [closureType, jobject])
-slowCallPattern (P: P: _)             = ("ap_pp", 2, replicate 2 closureType)
-slowCallPattern (P: V: _)             = ("ap_pv", 2, [closureType])
-slowCallPattern (P: _)                = ("ap_p", 1, [closureType])
-slowCallPattern (O: _)                = ("ap_o", 1, [jobject])
-slowCallPattern (N: _)                = ("ap_n", 1, [jint])
-slowCallPattern (L: _)                = ("ap_l", 1, [jlong])
-slowCallPattern (F: _)                = ("ap_f", 1, [jfloat])
-slowCallPattern (D: _)                = ("ap_d", 1, [jdouble])
-slowCallPattern (V: _)                = ("ap_v", 1, [])
-slowCallPattern []                    = ("ap_0", 0, [])
+  (5, replicate 5 closureType)
+slowCallPattern (P: P: P: P: _)       = (4, replicate 4 closureType)
+slowCallPattern (P: P: P: V: _)       = (4, replicate 3 closureType)
+slowCallPattern (P: P: P: _)          = (3, replicate 3 closureType)
+slowCallPattern (P: P: V: _)          = (3, replicate 2 closureType)
+slowCallPattern (P: P: _)             = (2, replicate 2 closureType)
+slowCallPattern (P: V: _)             = (2, [closureType])
+slowCallPattern (P: _)                = (1, [closureType])
+slowCallPattern (O: _)                = (1, [jobject])
+slowCallPattern (N: _)                = (1, [jint])
+slowCallPattern (L: _)                = (1, [jlong])
+slowCallPattern (F: _)                = (1, [jfloat])
+slowCallPattern (D: _)                = (1, [jdouble])
+slowCallPattern (V: _)                = (1, [])
+slowCallPattern []                    = (0, [])
 
 idPrimRep :: Id -> PrimRep
 idPrimRep = typePrimRep . idType

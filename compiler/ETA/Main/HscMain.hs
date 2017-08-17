@@ -81,7 +81,6 @@ module ETA.Main.HscMain
     , hscSimpleIface', hscNormalIface'
     , oneShotMsg
     , hscFileFrontEnd, genericHscFrontend, dumpIfaceStats
-    , renderRtsConfig
     ) where
 
 #ifdef GHCI
@@ -123,10 +122,8 @@ import ETA.SimplCore.SimplCore
 import ETA.Main.TidyPgm
 import ETA.Core.CorePrep
 import ETA.StgSyn.CoreToStg        ( coreToStg )
---import qualified StgCmm ( codeGen )
 import ETA.StgSyn.StgSyn
 import ETA.Profiling.CostCentre
---import ProfInit
 import ETA.Types.TyCon
 import ETA.BasicTypes.Name
 import ETA.SimplStg.SimplStg         ( stg2stg )
@@ -148,23 +145,16 @@ import ETA.Utils.UniqFM           ( emptyUFM )
 import ETA.BasicTypes.UniqSupply
 import ETA.Utils.Bag
 import ETA.Utils.Exception
--- import qualified ETA.Utils.Stream as Stream
--- import ETA.Utils.Stream (Stream)
 
 import ETA.Utils.Util
 
 import ETA.CodeGen.Main
 import ETA.CodeGen.Name
--- import ETA.Debug
-import ETA.CodeGen.Rts
 import ETA.Utils.JAR
 import ETA.Main.Packages
--- import ETA.Util
 import Codec.JVM
 
--- import Debug.Trace(traceShow)
 import Data.List
-import Control.Monad hiding (void)
 import Data.Maybe
 import Data.IORef
 import System.FilePath as FilePath
@@ -172,8 +162,7 @@ import System.Directory
 import qualified Data.Map as M
 import qualified Data.Text as T
 import Control.Arrow((&&&))
-import Data.Foldable(fold)
-import qualified Data.Monoid as Mon
+import Control.Monad
 
 #include "HsVersions.h"
 
@@ -1225,8 +1214,10 @@ hscGenHardCode hsc_env cgguts mod_summary output_filename = do
             <- {-# SCC "CoreToStg" #-}
                myCoreToStg dflags this_mod prepd_binds
 
+        let modClass = moduleJavaClass this_mod
         modClasses <- codeGen hsc_env this_mod data_tycons stg_binds hpc_info
-        let stubClasses = outputForeignStubs dflags foreign_stubs
+                              (lookupStubs modClass foreign_stubs)
+        let stubClasses = outputForeignStubs dflags foreign_stubs modClass
             classes = stubClasses ++ modClasses
             jarContents' = map (classFilePath &&& classFileBS) classes
         jarContents <- forM jarContents' $ \(a,b) -> do
@@ -1236,16 +1227,16 @@ hscGenHardCode hsc_env cgguts mod_summary output_filename = do
         addMultiByteStringsToJar' output_filename (compressionMethod dflags) jarContents
         return (output_filename, Nothing)
 
-outputForeignStubs :: DynFlags -> ForeignStubs -> [ClassFile]
-outputForeignStubs _dflags NoStubs = []
-outputForeignStubs dflags (ForeignStubs _ _ classExports) =
-  map f $ foreignExportsList classExports
+outputForeignStubs :: DynFlags -> ForeignStubs -> T.Text -> [ClassFile]
+outputForeignStubs _dflags NoStubs _ = []
+outputForeignStubs _dflags (ForeignStubs _ _ classExports) modClass =
+  map f $ filter (\(cls, _) -> cls /= modClass) $ foreignExportsList classExports
   where f (classSpec, (methodDefs, fieldDefs)) =
           mkClassFile java7 [Public, Super] (jvmify className) (Just superClass)
             interfaces fieldDefs methodDefs''
           where className':specs = T.words classSpec
                 className = jvmify className'
-                methodDefs' = genClInit className : methodDefs
+                methodDefs' = methodDefs
                 methodDefs'' = if hasConstructor
                                then methodDefs'
                                else  mkDefaultConstructor className superClass
@@ -1258,13 +1249,6 @@ outputForeignStubs dflags (ForeignStubs _ _ classExports) =
         parseSpecs [] sc is = (sc, reverse is)
         parseSpecs _ _ _ = error $ "Invalid foreign export spec."
         jvmify = T.map (\c -> if c == '.' then '/' else c)
-        genClInit cls = mkMethodDef cls [Public, Static] "<clinit>" [] void $ fold
-                          [ iconst jint 0
-                          , new (jarray jstring)
-                          , renderRtsConfig dflags False
-                          , invokestatic (mkMethodRef "eta/runtime/Rts" "hsInit"
-                                         [jarray jstring, rtsConfigType] void)
-                          , vreturn ]
 
 hscInteractive :: HscEnv
                -> CgGuts
@@ -1653,31 +1637,3 @@ showModuleIndex (i,n) = "[" ++ padded ++ " of " ++ n_str ++ "] "
     n_str = show n
     i_str = show i
     padded = replicate (length n_str - length i_str) ' ' ++ i_str
-
-
--- Render RTS Config
-renderRtsConfig :: DynFlags -> Bool -> Code
-renderRtsConfig dflags isHsMain
-  = invokestatic (mkMethodRef rtsConfig "getDefault" [] (ret rtsConfigType))
- <> putRtsHsMain
- <> putRtsOptsEnabled
- <> putRtsOpts
-  where (<>) = (Mon.<>)
-        putRtsHsMain
-          | isHsMain = dup rtsConfigType
-                    <> iconst jbool 1
-                    <> putfield (mkFieldRef rtsConfig "rtsHsMain" jbool)
-          | otherwise = mempty
-        rtsOptsEnabledText = T.pack . show . rtsOptsEnabled $ dflags
-        putRtsOptsEnabled
-          | rtsOptsEnabledText == "RtsOptsSafeOnly" = mempty
-          | otherwise = dup rtsConfigType
-                     <> getstatic (mkFieldRef rtsOptsEnbled rtsOptsEnabledText
-                                   rtsOptsEnbledType)
-                     <> putfield (mkFieldRef rtsConfig "rtsOptsEnabled"
-                                  rtsOptsEnbledType)
-        putRtsOpts = case rtsOpts dflags of
-          Nothing -> mempty
-          Just s  -> dup rtsConfigType
-                  <> sconst (T.pack s)
-                  <> putfield (mkFieldRef rtsConfig "rtsOpts" jstring)

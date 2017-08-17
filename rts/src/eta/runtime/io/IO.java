@@ -1,18 +1,21 @@
 package eta.runtime.io;
 
-import eta.runtime.stg.RtsFun;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+import java.lang.ref.ReferenceQueue;
+import java.lang.ref.PhantomReference;
+
+import eta.runtime.stg.Closure;
 import eta.runtime.stg.StgContext;
-import eta.runtime.stg.StgClosure;
 import eta.runtime.thunk.Ap2Upd;
 import eta.runtime.thunk.SelectorPUpd;
-import eta.runtime.RtsFlags;
 
 public class IO {
-    public static RtsFun decodeFloat_Int = new DecodeFloatInt();
-    public static RtsFun atomicModifyMutVar = new AtomicModifyMutVar();
-    public static RtsFun casMutVar = new CasMutVar();
 
-    public static void _decodeFloat_Int(StgContext context, float f) {
+    /* I/O primitive operations */
+    public static Closure decodeFloat_Int(StgContext context, float f) {
         int bits = Float.floatToRawIntBits(f);
         int s = ((bits >> 31) == 0) ? 1 : -1;
         int e = ((bits >> 23) & 0xff);
@@ -21,54 +24,69 @@ public class IO {
             (bits & 0x7fffff) | 0x800000;
         context.I(1, s * m);
         context.I(2, e - 150);
+        return null;
     }
 
-    private static class DecodeFloatInt extends RtsFun {
-        @Override
-        public void enter(StgContext context) {
-            float f = context.F(1);
-            _decodeFloat_Int(context, f);
+    public static Closure atomicModifyMutVar(StgContext context, MutVar mv, Closure f) {
+        Ap2Upd z = new Ap2Upd(f, null);
+        SelectorPUpd y = new SelectorPUpd(1, z);
+        SelectorPUpd r = new SelectorPUpd(2, z);
+        do {
+            Closure x = mv.value;
+            z.p2 = x;
+            if (!mv.cas(x, y)) {
+                continue;
+            }
+            mv.value = y;
+            break;
+        } while (true);
+        return r;
+    }
+
+    public static Closure casMutVar(StgContext context, MutVar mv, Closure old, Closure update) {
+        if (mv.cas(old, update)) {
+            context.I(1, 0);
+            return update;
+        } else {
+            context.I(1, 1);
+            return mv.value;
         }
     }
 
-    private static class AtomicModifyMutVar extends RtsFun {
-        @Override
-        public void enter(StgContext context) {
-            StgMutVar mv = (StgMutVar) context.O(1);
-            StgClosure f = context.R(1);
-            Ap2Upd z = new Ap2Upd(f, null);
-            SelectorPUpd y = new SelectorPUpd(1, z);
-            SelectorPUpd r = new SelectorPUpd(2, z);
-            do {
-                StgClosure x = mv.value;
-                z.p2 = x;
-                if (RtsFlags.ModeFlags.threaded) {
-                    if (!mv.cas(x, y)) {
-                        continue;
+    /* Managing ByteArrays */
+    public static ReferenceQueue<ByteArray> byteArrayRefQueue = new ReferenceQueue<ByteArray>();
+    public static AtomicBoolean byteArrayFreeLock = new AtomicBoolean();
+
+    public static Map<PhantomReference<ByteArray>, Long> byteArrayRefMap
+        = new ConcurrentHashMap<PhantomReference<ByteArray>, Long>();
+
+    public static void recordByteArray(ByteArray byteArray) {
+        long address = byteArray.bufferAddress;
+        PhantomReference<ByteArray> byteArrayRef
+            = new PhantomReference<ByteArray>(byteArray, byteArrayRefQueue);
+        byteArrayRefMap.put(byteArrayRef, address);
+    }
+
+    @SuppressWarnings("unchecked")
+    public static void checkForGCByteArrays() {
+        /* This check can be skipped if another thread is doing it. */
+        if (byteArrayFreeLock.compareAndSet(false, true)) {
+            try {
+                PhantomReference<ByteArray> ref;
+                while ((ref = (PhantomReference<ByteArray>) byteArrayRefQueue.poll())
+                       != null) {
+                    Long address = byteArrayRefMap.get(ref);
+                    if (address != null) {
+                        MemoryManager.free(address);
                     }
-                } else {
-                    mv.value = y;
+                    byteArrayRefMap.remove(ref);
                 }
-                break;
-            } while (true);
-            context.R(1, r);
-        }
-    }
-
-    private static class CasMutVar extends RtsFun {
-        @Override
-        public void enter(StgContext context) {
-            StgMutVar mv = (StgMutVar) context.O(1);
-            StgClosure old = context.R(1);
-            StgClosure new_ = context.R(2);
-            if (mv.cas(old, new_)) {
-                context.I(1, 0);
-                context.R(1, new_);
-            } else {
-                context.I(1, 1);
-                // TODO: Should there be a valid value here?
-                context.R(1, null);
+            } finally {
+                byteArrayFreeLock.set(false);
             }
         }
     }
+
+    /* Managing Non-Blocking I/O */
+
 }

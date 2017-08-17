@@ -4,6 +4,8 @@ module ETA.CodeGen.Bind where
 import ETA.StgSyn.StgSyn
 import ETA.Core.CoreSyn
 import ETA.BasicTypes.Id
+import ETA.BasicTypes.BasicTypes
+import ETA.BasicTypes.VarEnv
 import ETA.Utils.Util (unzipWith)
 import ETA.Types.TyCon
 import ETA.CodeGen.ArgRep
@@ -21,7 +23,7 @@ import ETA.Util
 import Data.Maybe (catMaybes)
 import ETA.Main.Constants
 import Codec.JVM
-import Control.Monad (forM, foldM)
+import Control.Monad (forM, foldM, when)
 import Data.Text (unpack)
 import Data.Foldable (fold)
 import Data.Monoid ((<>))
@@ -32,6 +34,7 @@ closureCodeBody
   -> Id                    -- the closure's name
   -> LambdaFormInfo        -- Lots of information about this closure
   -> [NonVoid Id]          -- incoming args to the closure
+  -> Maybe (Int, VarEnv Int)     -- Recursive ids for functions
   -> Int                   -- arity, including void args
   -> StgExpr               -- body
   -> [NonVoid Id]          -- the closure's free vars
@@ -39,9 +42,9 @@ closureCodeBody
   -> [Id]                  -- For a recursive block, the ids of the other
                            -- closures in the group.
   -> CodeGen ([FieldType], RecIndexes)
-closureCodeBody _ id lfInfo args arity body fvs binderIsFV recIds = do
+closureCodeBody _ id lfInfo args mFunRecIds arity body fvs binderIsFV recIds = do
   dflags <- getDynFlags
-  debug $ "creating new closure..." ++ unpack (idNameText dflags id)
+  traceCg $ str $ "creating new closure..." ++ unpack (idNameText dflags id)
   setClosureClass $ idNameText dflags id
   thisClass <- getClass
   (fvLocs', initCodes, recIndexes) <- generateFVs fvs recIds
@@ -64,26 +67,29 @@ closureCodeBody _ id lfInfo args arity body fvs binderIsFV recIds = do
     thunkCode lfInfo fvLocs body
   else do
     setSuperClass stgFun
-    defineMethod $ mkMethodDef thisClass [Public] "getArity" [] (ret jint)
+    defineMethod $ mkMethodDef thisClass [Public] "arity" [] (ret jint)
                  $  iconst jint (fromIntegral arity)
                  <> greturn jint
-    _ <- withMethod [Public] "enter" [contextType] void $ do
-      n <- peekNextLocal
-      let (argLocs, code, n') = mkCallEntry n args
-          (_ , cgLocs) = unzip argLocs
-      emit code
-      setNextLocal n'
-      bindArgs argLocs
-      label <- newLabel
-      -- TODO: Optimize: We only need to generate the stack map frame
-      --       if there will be a recursive call later. This will
-      --       have a significant effect on the size of the resulting
-      --       class files.
-      emit $ markStackMap
-          <> startLabel label
-      withSelfLoop (id, label, cgLocs) $ do
-        mapM_ bindFV fvLocs
-        cgExpr body
+    modClass <- getModClass
+    _ <- withMethod [Public] "enter" [contextType] (ret closureType) $
+      case mFunRecIds of
+        Just (n, funRecIds)
+          | Just target <- lookupVarEnv funRecIds id -> do
+            emit $ aconst_null closureType
+                <> loadContext
+                <> iconst jint (fromIntegral target)
+                <> invokestatic (mkMethodRef modClass (mkRecBindingMethodName n)
+                                    [closureType, contextType, jint] (ret closureType))
+                <> greturn closureType
+        _ -> do
+          argLocs <- mapM newIdLoc args
+          emit $ mkCallEntry argLocs
+          bindArgs $ zip args argLocs
+          label <- newLabel
+          emit $ startLabel label
+          withSelfLoop (id, label, argLocs) $ do
+            mapM_ bindFV fvLocs
+            cgExpr body
     return ()
   superClass <- getSuperClass
   -- Generate constructor
@@ -128,12 +134,12 @@ bindFV (id, cgLoc)= rebindId id cgLoc
 setupUpdate :: LambdaFormInfo -> CodeGen () -> CodeGen ()
 setupUpdate lfInfo body
   -- ASSERT lfInfo is of form LFThunk
-  | not (lfUpdatable lfInfo) = withEnterMethod stgThunk "enter"
-  | lfStaticThunk lfInfo = withEnterMethod stgIndStatic "thunkEnter"
-  | otherwise = withEnterMethod stgInd "thunkEnter"
-  where withEnterMethod thunkType name = do
+  | not (lfUpdatable lfInfo) = withEnterMethod stgThunk
+  | lfStaticThunk lfInfo     = withEnterMethod stgIndStatic
+  | otherwise                = withEnterMethod stgInd
+  where withEnterMethod thunkType = do
           setSuperClass thunkType
-          _ <- withMethod [Public] name [contextType] void body
+          _ <- withMethod [Public] "thunkEnter" [contextType] (ret closureType) body
           return ()
 
 cgBind :: StgBinding -> CodeGen ()
@@ -141,9 +147,9 @@ cgBind (StgNonRec name rhs) = do
   traceCg $ str "StgLet" <+> ppr name
   (info, genInitCode) <- cgRhs [] name rhs
   addBinding info
-  (init, recIndexes) <- genInitCode
+  (init, recIndexes, ft) <- genInitCode
   emit init
-  postInitCode <- postInitRecBinds name recIndexes
+  postInitCode <- postInitRecBinds name recIndexes ft
   emit postInitCode
 
 cgBind (StgRec pairs) = do
@@ -152,16 +158,16 @@ cgBind (StgRec pairs) = do
   let (idInfos, genInitCodes) = unzip result
   addBindings idInfos
   (results, body) <- getCodeWithResult $ sequence genInitCodes
-  let (inits, recIndexess) = unzip results
+  let (inits, recIndexess, fts) = unzip3 results
   emit $ fold inits
-  postInitCodes <- mapM (\(recId, recIndexes) -> postInitRecBinds recId recIndexes)
-                   $ zip recIds recIndexess
+  postInitCodes <- mapM (\(recId, recIndexes, ft) ->
+                           postInitRecBinds recId recIndexes ft)
+                   $ zip3 recIds recIndexess fts
   emit $ fold postInitCodes
-  -- TODO: What exactly is the body?
   emit $ body
   where recIds = map fst pairs
 
-cgRhs :: [Id] -> Id -> StgRhs -> CodeGen (CgIdInfo, CodeGen (Code, RecIndexes))
+cgRhs :: [Id] -> Id -> StgRhs -> CodeGen (CgIdInfo, CodeGen (Code, RecIndexes, FieldType))
 cgRhs recIds id (StgRhsCon _ con args) = buildDynCon id con args (id:recIds)
 cgRhs recIds name (StgRhsClosure _ binderInfo fvs updateFlag _ args body)
   = mkRhsClosure name binderInfo nonVoidFvs updateFlag args body recIds
@@ -175,7 +181,7 @@ mkRhsClosure
   -> [Id]
   -> StgExpr
   -> [Id]
-  -> CodeGen (CgIdInfo, CodeGen (Code, RecIndexes))
+  -> CodeGen (CgIdInfo, CodeGen (Code, RecIndexes, FieldType))
 mkRhsClosure binder _ [NonVoid theFv] updateFlag [] expr recIds
   | StgCase (StgApp scrutinee [])
       _ _ _ _
@@ -205,7 +211,7 @@ mkRhsClosure binder _ fvs updateFlag args body recIds = do
   return (idInfo, genCode lfInfo cgLoc)
   where genCode lfInfo cgLoc = do
           ((fields, recIndexes), CgState { cgClassName }) <- forkClosureBody $
-            closureCodeBody False binder lfInfo (nonVoidIds args) (length args)
+            closureCodeBody False binder lfInfo (nonVoidIds args) Nothing (length args)
                             body reducedFVs binderIsFV recIds
 
           loads <- forM reducedFVs $ \(NonVoid id) ->
@@ -220,7 +226,7 @@ mkRhsClosure binder _ fvs updateFlag args body recIds = do
                <> dup ft
                <> fold loads
                <> invokespecial (mkMethodRef cgClassName "<init>" fields void)
-          return (mkRhsInit cgLoc closureCode, recIndexes)
+          return (mkRhsInit cgLoc closureCode, recIndexes, ft)
           where nvBinder = NonVoid binder
                 binderIsFV = nvBinder `elem` fvs
                 reducedFVs
@@ -232,16 +238,16 @@ cgRhsStdThunk :: Id
               -> [StgArg]
               -> [Id]
               -> CodeGen ( CgIdInfo
-                         , CodeGen (Code, RecIndexes) )
+                         , CodeGen (Code, RecIndexes, FieldType) )
 cgRhsStdThunk binder lfInfo payload recIds = do
   let (ft, genThunk) = genStdThunk lfInfo
   (idInfo, cgLoc) <- rhsGenIdInfo binder lfInfo ft
   traceCg $ str "cgRhsStdThunk:" <+> ppr idInfo <+> ppr cgLoc <+> ppr binder <+> ppr payload
-  return (idInfo, genCode cgLoc genThunk)
-  where genCode cgLoc genThunk = do
+  return (idInfo, genCode cgLoc genThunk ft)
+  where genCode cgLoc genThunk ft = do
           (recIndexes, loads) <- foldM foldLoads ([], mempty) $ indexList payload
           let thunkInitCode = genThunk loads
-          return (mkRhsInit cgLoc thunkInitCode, recIndexes)
+          return (mkRhsInit cgLoc thunkInitCode, recIndexes, ft)
 
         -- TODO: Generalize to accommodate DynCons as well
         foldLoads (is, code) (i, arg)
@@ -252,13 +258,12 @@ cgRhsStdThunk binder lfInfo payload recIds = do
               loadCode <- getArgLoadCode (NonVoid arg)
               return (is, code <> loadCode)
 
-postInitRecBinds :: Id -> RecIndexes -> CodeGen Code
-postInitRecBinds _ [] = return mempty
-postInitRecBinds binder recIndexes = do
+postInitRecBinds :: Id -> RecIndexes -> FieldType -> CodeGen Code
+postInitRecBinds _binder [] _ft = return mempty
+postInitRecBinds binder recIndexes ft = do
   CgIdInfo { cgLocation } <- getCgIdInfo binder
   let binderLoad = loadLoc cgLocation
-      ft = locFt cgLocation
-      clClass = getFtClass (locFt cgLocation)
+      clClass = getFtClass ft
   recInitCodes <- forM recIndexes $ \(i, recId) -> do
     CgIdInfo { cgLocation } <- getCgIdInfo recId
     let recLoad = loadLoc cgLocation

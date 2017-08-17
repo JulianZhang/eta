@@ -76,6 +76,7 @@ import Data.Typeable
 import Data.Maybe
 import Foreign
 import System.Posix.Internals hiding (FD)
+import System.Posix.Types (Channel)
 
 import Foreign.C
 
@@ -432,25 +433,21 @@ handleFinalizer fp m = do
 dEFAULT_CHAR_BUFFER_SIZE :: Int
 dEFAULT_CHAR_BUFFER_SIZE = 2048 -- 8k/sizeof(HsChar)
 
-getCharBuffer :: IODevice dev => dev -> BufferState
-              -> IO (IORef CharBuffer, BufferMode)
-getCharBuffer dev state = do
+getCharBuffer :: BufferState
+              -> IO (IORef CharBuffer)
+getCharBuffer state = do
   buffer <- newCharBuffer dEFAULT_CHAR_BUFFER_SIZE state
-  ioref  <- newIORef buffer
-  is_tty <- IODevice.isTerminal dev
+  newIORef buffer
 
-  let buffer_mode
-         | is_tty    = LineBuffering
-         | otherwise = BlockBuffering Nothing
-
-  return (ioref, buffer_mode)
-
-mkUnBuffer :: BufferState -> IO (IORef CharBuffer, BufferMode)
-mkUnBuffer state = do
-  buffer <- newCharBuffer dEFAULT_CHAR_BUFFER_SIZE state
-              --  See [note Buffer Sizing], GHC.IO.Handle.Types
-  ref <- newIORef buffer
-  return (ref, NoBuffering)
+getBufferMode :: IODevice dev => dev
+              -> Maybe BufferMode
+              -> IO BufferMode
+getBufferMode _ (Just mode) = return mode
+getBufferMode dev Nothing = do
+   is_tty <- IODevice.isTerminal dev
+   if is_tty
+     then return LineBuffering
+     else return (BlockBuffering Nothing)
 
 -- -----------------------------------------------------------------------------
 -- Flushing buffers
@@ -607,24 +604,22 @@ flushByteReadBuffer h_@Handle__{..} = do
 mkHandle :: (IODevice dev, BufferedIO dev, Typeable dev) => dev
             -> FilePath
             -> HandleType
-            -> Bool                     -- buffered?
+            -> Maybe BufferMode
             -> Maybe TextEncoding
             -> NewlineMode
             -> Maybe HandleFinalizer
             -> Maybe (MVar Handle__)
             -> IO Handle
 
-mkHandle dev filepath ha_type buffered mb_codec nl finalizer other_side = do
+mkHandle dev filepath ha_type mb_bmode mb_codec nl finalizer other_side = do
    openTextEncoding mb_codec ha_type $ \ mb_encoder mb_decoder -> do
 
    let buf_state = initBufferState ha_type
    bbuf <- Buffered.newBuffer dev buf_state
    bbufref <- newIORef bbuf
    last_decode <- newIORef (error "codec_state", bbuf)
-
-   (cbufref,bmode) <-
-         if buffered then getCharBuffer dev buf_state
-                     else mkUnBuffer buf_state
+   cbufref <- getCharBuffer buf_state
+   bmode <- getBufferMode dev mb_bmode
 
    spares <- newIORef BufferListNil
    newFileHandle filepath finalizer
@@ -658,7 +653,7 @@ mkFileHandle :: (IODevice dev, BufferedIO dev, Typeable dev)
                     -- Translate newlines?
              -> IO Handle
 mkFileHandle dev filepath iomode mb_codec tr_newlines = do
-   mkHandle dev filepath (ioModeToHandleType iomode) True{-buffered-} mb_codec
+   mkHandle dev filepath (ioModeToHandleType iomode) Nothing mb_codec
             tr_newlines
             (Just handleFinalizer) Nothing{-other_side-}
 
@@ -670,13 +665,13 @@ mkDuplexHandle :: (IODevice dev, BufferedIO dev, Typeable dev) => dev
 mkDuplexHandle dev filepath mb_codec tr_newlines = do
 
   write_side@(FileHandle _ write_m) <-
-       mkHandle dev filepath WriteHandle True mb_codec
+       mkHandle dev filepath WriteHandle Nothing mb_codec
                         tr_newlines
                         (Just handleFinalizer)
                         Nothing -- no othersie
 
   read_side@(FileHandle _ read_m) <-
-      mkHandle dev filepath ReadHandle True mb_codec
+      mkHandle dev filepath ReadHandle Nothing mb_codec
                         tr_newlines
                         Nothing -- no finalizer
                         (Just write_m)
@@ -800,8 +795,7 @@ debugIO :: String -> IO ()
 debugIO s
  | c_DEBUG_DUMP
     = do _ <- withCStringLen (s ++ "\n") $
-                  \(p, len) -> c_write undefined (castPtr p) (fromIntegral len)
-                  -- \(p, len) -> c_write 1 (castPtr p) (fromIntegral len)
+                  \(p, len) -> c_write _stdout (castPtr p) (fromIntegral len)
          return ()
  | otherwise = return ()
 

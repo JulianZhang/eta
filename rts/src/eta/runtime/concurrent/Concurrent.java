@@ -1,213 +1,313 @@
 package eta.runtime.concurrent;
 
-import eta.runtime.Rts;
+import java.io.IOException;
+import java.util.Map;
+import java.util.Deque;
+import java.util.Iterator;
+import java.util.concurrent.Future;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedDeque;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.nio.channels.Channel;
+import java.nio.channels.Selector;
+import java.nio.channels.SelectionKey;
+import java.nio.channels.SelectableChannel;
+import java.nio.channels.ClosedChannelException;
+
+import eta.runtime.Runtime;
 import eta.runtime.stg.Stg;
 import eta.runtime.stg.Capability;
-import eta.runtime.stg.StgTSO;
-import eta.runtime.stg.StgClosure;
-import eta.runtime.stg.RtsFun;
+import eta.runtime.stg.TSO;
+import eta.runtime.stg.Closure;
 import eta.runtime.stg.StgContext;
-import eta.runtime.stg.ReturnClosure;
-import eta.runtime.exception.StgException;
-import static eta.runtime.RtsMessages.barf;
-import static eta.runtime.stg.StgTSO.TSO_BLOCKEX;
-import static eta.runtime.stg.StgTSO.TSO_INTERRUPTIBLE;
-import static eta.runtime.stg.StgTSO.TSO_LOCKED;
-import static eta.runtime.stg.StgTSO.WhyBlocked;
-import static eta.runtime.stg.StgTSO.WhatNext;
-import static eta.runtime.stg.StgTSO.WhyBlocked.BlockedOnMVar;
-import static eta.runtime.stg.StgTSO.WhyBlocked.BlockedOnMVarRead;
-import static eta.runtime.stg.StgTSO.WhatNext.ThreadRunGHC;
-import static eta.runtime.stg.StgTSO.WhatNext.ThreadComplete;
-import static eta.runtime.stg.StgTSO.WhatNext.ThreadKilled;
-import static eta.runtime.stg.StgContext.ReturnCode.ThreadBlocked;
-import static eta.runtime.stg.StgContext.ReturnCode.ThreadYielding;
+import eta.runtime.exception.Exception;
+import static eta.runtime.RuntimeLogging.barf;
+import static eta.runtime.stg.TSO.*;
+import static eta.runtime.stg.TSO.WhyBlocked;
+import static eta.runtime.stg.TSO.WhatNext;
+import static eta.runtime.stg.TSO.WhyBlocked.*;
+import static eta.runtime.stg.TSO.WhatNext.*;
 
 public class Concurrent {
     public static final int SPIN_COUNT = 1000;
 
-    public static RtsFun takeMVar = new TakeMVar();
-    public static RtsFun readMVar = new ReadMVar();
-    public static RtsFun putMVar = new PutMVar();
-    public static RtsFun block_takemvar = new BlockTakeMVar();
-    public static RtsFun block_readmvar = new BlockReadMVar();
-    public static RtsFun block_putmvar = new BlockPutMVar();
-    public static RtsFun tryReadMVar = new TryReadMVar();
-    public static RtsFun fork = new Fork();
-    public static RtsFun forkOn = new ForkOn();
-    public static RtsFun yield = new Yield();
-    public static RtsFun yield_noregs = new YieldNoRegs();
-    public static RtsFun isCurrentThreadBound = new IsCurrentThreadBound();
-    public static RtsFun threadStatus = new ThreadStatus();
+    /* Global Run Queue */
 
-    private static class TakeMVar extends RtsFun {
-        @Override
-        public void enter(StgContext context) {
-            StgMVar mvar = (StgMVar) context.O(1);
+    public static final Deque<TSO> globalRunQueue = new ConcurrentLinkedDeque<TSO>();
+    public static long globalRunQueueModifiedTime = 0;
+
+    public static void pushToGlobalRunQueue(TSO tso) {
+        assert tso.cap == null;
+        globalRunQueue.offerFirst(tso);
+    }
+
+    public static boolean emptyGlobalRunQueue() {
+        return globalRunQueue.isEmpty();
+    }
+
+    /* MVar Operations */
+
+    public static Closure takeMVar(StgContext context, MVar mvar) {
+        do {
             try {
-                context.R(1, mvar.take());
-            } catch (InterruptedException ie) {
-                barf("takeMVar: Unexpected interrupt.");
-            }
-        }
+                return mvar.take();
+            } catch (InterruptedException ie) {}
+        } while (true);
     }
 
-    private static class ReadMVar extends RtsFun {
-        @Override
-        public void enter(StgContext context) {
-            StgMVar mvar = (StgMVar) context.O(1);
-            context.R(1, mvar.read());
-        }
+    public static Closure readMVar(StgContext context, MVar mvar) {
+        return mvar.read();
     }
 
-    private static class PutMVar extends RtsFun {
-        @Override
-        public void enter(StgContext context) {
-            StgMVar mvar = (StgMVar) context.O(1);
-            StgClosure val = context.R(1);
+    public static Closure putMVar(StgContext context, MVar mvar, Closure val) {
+        do {
             try {
                 mvar.put(val);
-            } catch (InterruptedException ie) {
-                barf("putMVar: Unexpected interrupt.");
+                return null;
+            } catch (InterruptedException ie) {}
+        } while (true);
+    }
+
+    public static Closure tryReadMVar(StgContext context, MVar mvar) {
+        Closure value = mvar.tryRead();
+        context.I(1, (value == null)? 0: 1);
+        return value;
+    }
+
+    public static Closure fork(StgContext context, Closure closure) {
+        Capability cap = context.myCapability;
+        TSO currentTSO = context.currentTSO;
+        TSO tso = Runtime.createIOThread(closure);
+        tso.addFlags(currentTSO.andFlags(TSO_BLOCKEX | TSO_INTERRUPTIBLE));
+        pushToGlobalRunQueue(tso);
+        cap.idleLoop(false);
+        context.O(1, tso);
+        return null;
+    }
+
+    /* TODO: The scheduling policy in Eta is for TSOs to get grabbed by Capabilities
+             and keep executing them to completion which doesn't happen THAT
+             frequently.
+
+             Hence, it makes no sense to use `forkOn` in Eta since threads will
+             be bound to a given thread anyways. If you put multiple threads on
+             a single Capability, be warned that one of the threads may never run!
+     */
+    public static Closure forkOn(StgContext context, int cpu, Closure closure) {
+        return fork(context, closure);
+    }
+
+    public static Closure yield(StgContext context) {
+        Capability cap = context.myCapability;
+        TSO tso        = context.currentTSO;
+        tso.whyBlocked = BlockedOnYield;
+        tso.blockInfo  = null;
+        cap.blockedLoop();
+        return null;
+    }
+
+    /* In Eta, all the threads are bound, so this always returns true. */
+    public static Closure isCurrentThreadBound(StgContext context) {
+        context.I(1, 1);
+        return null;
+    }
+
+    public static Closure threadStatus(StgContext context, TSO tso) {
+        WhatNext whatNext = tso.whatNext;
+        int ret;
+        WhyBlocked whyBlocked = tso.whyBlocked;
+        if (whatNext == ThreadComplete) {
+            ret = 16;
+        } else {
+            if (whatNext == ThreadKilled) {
+                ret = 17;
+            } else {
+                ret = whyBlocked.getVal();
             }
         }
+        int cap = tso.cap.id;
+        /* NOTE: The Eta RTS doesn't have a concept of TSO locking. It hurts more
+                 than helps performance due to the fact that we can't presently
+                 save/restore the Java stack. */
+        int locked = 0;
+        context.I(1, ret);
+        context.I(2, cap);
+        context.I(3, locked);
+        return null;
     }
 
-    private static class BlockTakeMVar extends RtsFun {
-        @Override
-        public void enter(StgContext context) {
-            Capability cap = context.myCapability;
-            StgMVar mvar = (StgMVar) context.O(1);
-            StgTSO tso = context.currentTSO;
-            tso.sp.add(new BlockTakeMVarFrame(mvar));
-            tso.whatNext = ThreadRunGHC;
-            context.ret = ThreadBlocked;
-            cap.threadPaused(tso);
-            mvar.unlock();
-            throw StgException.stgReturnException;
+    /* TODO: Implement this */
+    public static Closure traceEvent(StgContext context) {
+        return null;
+    }
+
+    /* Managing Java Futures */
+
+    public static final Map<Future, TSO> futureMap
+        = new ConcurrentHashMap<Future, TSO>();
+
+    public static final AtomicBoolean futureMapLock = new AtomicBoolean();
+
+    public static final class FutureBlockResult {
+        public Object    result;
+        public Exception exception;
+        public FutureBlockResult(Object result, Exception e) {
+            this.result    = result;
+            this.exception = exception;
         }
     }
 
-    private static class BlockReadMVar extends RtsFun {
-        @Override
-        public void enter(StgContext context) {
-            StgMVar mvar = (StgMVar) context.O(1);
-            StgTSO tso = context.currentTSO;
-            tso.sp.add(new BlockReadMVarFrame(mvar));
-            tso.whatNext = ThreadRunGHC;
-            context.ret = ThreadBlocked;
-            Stg.returnToSched.enter(context);
-        }
-    }
-
-    private static class BlockPutMVar extends RtsFun {
-        @Override
-        public void enter(StgContext context) {
-            Capability cap = context.myCapability;
-            StgTSO tso = context.currentTSO;
-            StgMVar mvar = (StgMVar) context.O(1);
-            StgClosure val = context.R(1);
-            tso.spPush(new BlockPutMVarFrame(mvar, val));
-            tso.whatNext = ThreadRunGHC;
-            context.ret = ThreadBlocked;
-            cap.threadPaused(tso);
-            mvar.unlock();
-            throw StgException.stgReturnException;
-        }
-    }
-
-    private static class TryReadMVar extends RtsFun {
-        @Override
-        public void enter(StgContext context) {
-            StgMVar mvar = (StgMVar) context.O(1);
-            StgClosure value = mvar.tryRead();
-            context.I(1, (value == null)? 0: 1);
-            context.R(1, value);
-        }
-    }
-
-    private static class Fork extends RtsFun {
-        @Override
-        public void enter(StgContext context) {
-            Capability cap = context.myCapability;
-            StgTSO currentTSO = context.currentTSO;
-            StgClosure closure = context.R(1);
-            StgTSO tso = Rts.scheduleIOClosure(closure);
-            cap.contextSwitch = true;
-            context.O(1, tso);
-        }
-    }
-
-    private static class ForkOn extends RtsFun {
-        @Override
-        public void enter(StgContext context) {
-            Capability cap = context.myCapability;
-            StgTSO currentTSO = context.currentTSO;
-            int cpu = context.I(1);
-            StgClosure closure = context.R(1);
-            StgTSO tso = Rts.createIOThread(cap, closure);
-            tso.addFlags(TSO_BLOCKEX | TSO_INTERRUPTIBLE);
-            Rts.scheduleThreadOn(cap, cpu, tso);
-            cap.contextSwitch = true;
-            context.O(1, tso);
-        }
-    }
-
-    private static class Yield extends RtsFun {
-        @Override
-        public void enter(StgContext context) {
-            Capability cap = context.myCapability;
-            cap.contextSwitch = true;
-            Concurrent.yield_noregs.enter(context);
-        }
-    }
-
-    private static class YieldNoRegs extends RtsFun {
-        @Override
-        public void enter(StgContext context) {
-            StgTSO tso = context.currentTSO;
-            context.ret = ThreadYielding;
-            tso.whatNext = ThreadRunGHC;
-            Stg.returnToSched.enter(context);
-        }
-    }
-
-    /* TODO: Inline this */
-    private static class IsCurrentThreadBound extends RtsFun {
-        @Override
-        public void enter(StgContext context) {
-            StgTSO tso = context.currentTSO;
-            context.I(1, tso.isBound()? 1 : 0);
-        }
-    }
-
-    private static class ThreadStatus extends RtsFun {
-        @Override
-        public void enter(StgContext context) {
-            StgTSO tso = (StgTSO) context.O(1);
-            WhatNext whatNext = tso.whatNext;
-            int ret;
-            WhyBlocked whyBlocked = tso.whyBlocked;
-            if (whatNext == ThreadComplete) {
-                ret = 16;
-            } else {
-                if (whatNext == ThreadKilled) {
-                    ret = 17;
-                } else {
-                    ret = whyBlocked.getVal();
+    public static void checkForCompletedFutures(Capability cap) {
+        /* Only one thread at a time should check the futures. */
+        if (futureMapLock.compareAndSet(false, true)) {
+            try {
+                Iterator<Map.Entry<Future, TSO>> it = futureMap.entrySet().iterator();
+                while (it.hasNext()) {
+                    Map.Entry<Future, TSO> entry  = it.next();
+                    Future                 future = entry.getKey();
+                    TSO                    tso    = entry.getValue();
+                    if (future.isDone()) {
+                        it.remove();
+                        Object    result    = null;
+                        java.lang.Exception exception = null;
+                        do {
+                            try {
+                                result    = future.get();
+                            } catch (CancellationException e) {
+                                exception = e;
+                            } catch (ExecutionException e) {
+                                exception = e;
+                            } catch (InterruptedException e) {
+                                /* TODO: Is this the right behavior? */
+                                continue;
+                            }
+                            break;
+                        } while (true);
+                        tso.blockInfo = new FutureResult(result, exception);
+                        cap.tryWakeupThread(tso);
+                    }
                 }
+            } finally {
+                futureMapLock.set(false);
             }
-            int cap = tso.cap.no;
-            int locked;
-            if (tso.hasFlag(TSO_LOCKED)) {
-                locked = 1;
-            } else {
-                locked = 0;
-            }
-            context.I(1, ret);
-            context.I(2, cap);
-            context.I(3, locked);
         }
     }
 
+    public static Closure threadWaitFuture(StgContext context, Future future) {
+        Capability cap = context.myCapability;
+        TSO tso        = context.currentTSO;
+        tso.whyBlocked = BlockedOnFuture;
+        tso.blockInfo  = future;
+        do {
+            if (futureMap.get(future) == null) {
+                futureMap.put(future, tso);
+            }
+            cap.blockedLoop();
+        } while (!future.isDone());
+        Object exception = null;
+        Object result    = null;
+        if (tso.blockInfo != null) {
+            FutureResult futureResult = (FutureResult) tso.blockInfo;
+            exception = futureResult.exception;
+            result    = futureResult.result;
+            tso.blockInfo = null;
+        }
+        context.O(1, exception);
+        context.O(2, result);
+        return null;
+    }
+
+    /* Managing Scalable I/O */
+
+    public static Selector globalSelector;
+
+    static {
+        try {
+            globalSelector = Selector.open();
+        } catch (IOException e) {
+            globalSelector = null;
+        }
+    }
+    public static AtomicBoolean selectorLock = new AtomicBoolean();
+
+    public static Closure threadWaitIO(StgContext context, Channel channel, int ops) {
+        Capability cap = context.myCapability;
+        TSO tso        = context.currentTSO;
+        if (globalSelector == null) {
+            barf("Your platform does not support non-blocking IO.");
+        }
+        if (!(channel instanceof SelectableChannel)) {
+            barf("Non-selectable channel sent to threadWaitIO#.");
+        }
+        SelectionKey selectKey = null;
+        try {
+            SelectableChannel selectChannel = (SelectableChannel) channel;
+            selectKey = selectChannel.register(globalSelector, ops, tso);
+        } catch (ClosedChannelException e) {
+            /* TODO: If the channel is closed, the user should know about it.
+               Notify them in some form. */
+        }
+        WhyBlocked blocked;
+        switch (ops) {
+            case SelectionKey.OP_READ:
+                blocked = BlockedOnRead;
+                break;
+            case SelectionKey.OP_WRITE:
+                blocked = BlockedOnRead;
+                break;
+            default:
+                blocked = BlockedOnIO;
+                break;
+        }
+        tso.whyBlocked = blocked;
+        tso.blockInfo  = selectKey;
+        do {
+            cap.blockedLoop();
+        } while (selectKey.isValid());
+        return null;
+    }
+
+    public static Closure waitRead(StgContext context, Object o) {
+        return threadWaitIO(context, (Channel) o, SelectionKey.OP_READ);
+    }
+
+    public static Closure waitWrite(StgContext context, Object o) {
+        return threadWaitIO(context, (Channel) o, SelectionKey.OP_WRITE);
+    }
+
+    public static void checkForReadyIO(Capability cap) {
+        if (selectorLock.compareAndSet(false, true)) {
+            try {
+                int selectedKeys = globalSelector.selectNow();
+                if (selectedKeys > 0) {
+                    Iterator<SelectionKey> it = globalSelector.selectedKeys().iterator();
+                    while (it.hasNext()) {
+                        SelectionKey key = it.next();
+                        if (key.isValid() && ((key.readyOps() & key.interestOps()) != 0)) {
+                            TSO tso = (TSO) key.attachment();
+                            key.cancel();
+                            cap.tryWakeupThread(tso);
+                        }
+                        it.remove();
+                    }
+                }
+            } catch (IOException e) {
+                /* TODO: If the selector is closed, the user should know about it.
+                   Do some logging here. */
+            } finally {
+                selectorLock.set(false);
+            }
+        }
+    }
+
+    public static int forkOS_createThread(int stablePtr) {
+        try {
+            new OSThread(stablePtr).start();
+        } catch (java.lang.Exception e) {
+            return 1;
+        }
+        return 0;
+    }
 }

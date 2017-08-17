@@ -1,14 +1,11 @@
 {-# LANGUAGE OverloadedStrings #-}
 module ETA.CodeGen.Rts where
 
-
-
-import Data.Text
+import Data.Text (Text)
 import Codec.JVM
-import ETA.Util
+import Codec.JVM.Const
 
 import Data.Monoid((<>))
-
 
 import qualified Data.Text as T
 
@@ -16,7 +13,7 @@ import qualified Data.Text as T
 
 -- merge "a" "b" == "a/b"
 merge :: Text -> Text -> Text
-merge x y = append x . cons '/' $ y
+merge x y = T.append x . T.cons '/' $ y
 
 rts, apply, thunk, stg, exception, io, util, stm, par, interp, conc :: Text -> Text
 rts       = merge "eta/runtime"
@@ -32,7 +29,7 @@ par       = merge (rts "parallel")
 interp    = merge (rts "interpreter")
 
 closureType, indStaticType, contextType, capabilityType, taskType, funType, tsoType,
-  frameType, rtsFunType, conType, thunkType, rtsConfigType, exitCodeType,
+  frameType, conType, thunkType, rtsConfigType, exitCodeType,
   rtsOptsEnbledType, stgArrayType, stgByteArrayType, stgMutVarType, stgMVarType,
   hsResultType, stgTVarType, stgBCOType, stgWeakType :: FieldType
 closureType       = obj stgClosure
@@ -43,7 +40,6 @@ taskType          = obj task
 funType           = obj stgFun
 tsoType           = obj stgTSO
 frameType         = obj stackFrame
-rtsFunType        = obj rtsFun
 conType           = obj stgConstr
 thunkType         = obj stgThunk
 rtsConfigType     = obj rtsConfig
@@ -60,33 +56,32 @@ stgWeakType       = obj stgWeak
 
 stgConstr, stgClosure, stgContext, capability, task, stgInd, stgIndStatic, stgThunk,
   stgFun, stgTSO, stackFrame, rtsConfig, rtsOptsEnbled, exitCode, stgArray,
-  stgByteArray, rtsUnsigned, stgMutVar, stgMVar, stgTVar, rtsGroup, hsResult, rtsFun,
+  stgByteArray, rtsUnsigned, stgMutVar, stgMVar, stgTVar, rtsGroup, hsResult,
   stgBCO, stgWeak :: Text
-stgConstr     = stg "StgConstr"
-stgClosure    = stg "StgClosure"
+stgConstr     = stg "DataCon"
+stgClosure    = stg "Closure"
 stgContext    = stg "StgContext"
 capability    = stg "Capability"
 task          = stg "Task"
-stgInd        = thunk "StgInd"
-stgIndStatic  = thunk "StgIndStatic"
-stgThunk      = thunk "StgThunk"
-stgFun        = apply "StgFun"
-stgTSO        = stg "StgTSO"
+stgInd        = thunk "UpdatableThunk"
+stgIndStatic  = thunk "CAF"
+stgThunk      = thunk "Thunk"
+stgFun        = apply "Function"
+stgTSO        = stg "TSO"
 stackFrame    = stg "StackFrame"
-rtsFun        = stg "RtsFun"
 rtsConfig     = rts "RtsConfig"
-rtsOptsEnbled = rts "RtsFlags$RtsOptsEnabled"
-exitCode      = rts "Rts$ExitCode"
-stgArray      = io "StgArray"
-stgByteArray  = io "StgByteArray"
+rtsOptsEnbled = rts "RuntimeOptions$RtsOptsEnabled"
+exitCode      = rts "Runtime$ExitCode"
+stgArray      = io "Array"
+stgByteArray  = io "ByteArray"
 rtsUnsigned   = merge "eta/integer" "Utils"
-stgMutVar     = io "StgMutVar"
-stgMVar       = conc "StgMVar"
-stgTVar       = stm "StgTVar"
-stgBCO        = interp "StgBCO"
-stgWeak       = stg "StgWeak"
-rtsGroup      = rts "Rts"
-hsResult      = rts "Rts$HaskellResult"
+stgMutVar     = io "MutVar"
+stgMVar       = conc "MVar"
+stgTVar       = stm "TVar"
+stgBCO        = interp "BCO"
+stgWeak       = stg "WeakPtr"
+rtsGroup      = rts "Runtime"
+hsResult      = rts "Runtime$StgResult"
 
 
 memoryManager :: Text
@@ -107,10 +102,6 @@ contextLoadStore name ft =
   ( invokevirtual $ mkMethodRef stgContext name [jint, ft] void
   , invokevirtual $ mkMethodRef stgContext name [jint] (ret ft))
 
-argPatToFrame :: Text -> Text
-argPatToFrame patText = append (upperFirst a) (toUpper b)
-  where [a,b] = split (== '_') patText
-
 loadContext :: Code
 loadContext = gload contextType 1
 
@@ -130,27 +121,37 @@ checkForStackFramesMethod :: Code
 checkForStackFramesMethod =
   invokevirtual (mkMethodRef stgContext "checkForStackFrames" [jint, frameType] (ret jbool))
 
-mkApFast :: Text -> Code
-mkApFast patText =
-     getstatic (mkFieldRef (apply "Apply") fullPat rtsFunType)
-  <> loadContext
-  <> invokevirtual (mkMethodRef rtsFun "enter" [contextType] void)
-  -- TODO: We can do better than rtsFun, but it depends on the
-  --       determinism of javac.
-  where fullPat = append patText "_fast"
+mkApFast :: Int -> [FieldType] -> Code
+mkApFast arity rawFts = invokevirtual (mkMethodRef stgClosure applyFun rawFts (Just closureType))
+  where fts = drop 1 rawFts
+        applyFun
+          | arity == 0 && null fts = "evaluate"
+          | otherwise              = T.concat ["apply", foldMap toLetter fts, withV]
+        withV
+          | arity /= length fts    = "V"
+          | otherwise              = ""
+        toLetter ft
+          | ft == closureType      = "P"
+          | ft == jobject          = "O"
+          | ft == jint             = "I"
+          | ft == jlong            = "L"
+          | ft == jfloat           = "F"
+          | ft == jdouble          = "D"
+          | otherwise              = error $ "mkApFast: Invalid field type ["
+                                          ++ show ft ++ "]."
 
 apUpdName :: Int -> Text
-apUpdName n = thunk $ T.concat ["Ap",  pack $ show n, "Upd"]
+apUpdName n = thunk $ T.concat ["Ap",  T.pack $ show n, "Upd"]
 
 selectThunkName :: Bool -> Text -> Text
 selectThunkName updatable repText = thunk $ T.concat ["Selector", repText, updText]
   where updText = if updatable then "Upd" else "NoUpd"
 
 constrField :: Int -> Text
-constrField = cons 'x' . pack . show
+constrField = T.cons 'x' . T.pack . show
 
 constrFieldGetter :: Int -> Text
-constrFieldGetter = append "get" . pack . show
+constrFieldGetter = T.append "get" . T.pack . show
 
 myCapability :: FieldRef
 myCapability = mkFieldRef stgContext "myCapability" capabilityType
@@ -161,25 +162,22 @@ contextMyCapability = getfield myCapability
 contextMyCapabilitySet :: Code
 contextMyCapabilitySet = putfield myCapability
 
-suspendThreadMethod :: Bool -> Code
-suspendThreadMethod interruptible =
+suspendInterruptsMethod :: Bool -> Code
+suspendInterruptsMethod interruptible =
      loadContext
-  <> contextMyCapability
-  -- <> dup capabilityType
+  <> currentTSOField
+  <> dup tsoType
   <> iconst jbool (boolToInt interruptible)
-  <> invokevirtual (mkMethodRef capability "suspendThread" [jbool] (ret taskType))
-  where boolToInt True = 1
+  <> invokevirtual (mkMethodRef stgTSO "suspendInterrupts" [jbool] (ret jbool))
+  where boolToInt True  = 1
         boolToInt False = 0
 
-resumeThreadMethod :: Code
-resumeThreadMethod =
-     invokestatic (mkMethodRef capability "resumeThread" [taskType] (ret capabilityType))
-  <> loadContext
-  <> swap capabilityType contextType
-  <> contextMyCapabilitySet
+resumeInterruptsMethod :: Code
+resumeInterruptsMethod =
+  invokevirtual $ mkMethodRef stgTSO "resumeInterrupts" [jbool] void
 
 stgExceptionGroup, ioGroup, stmGroup, concGroup, parGroup, interpGroup, stgGroup :: Text
-stgExceptionGroup = exception "StgException"
+stgExceptionGroup = exception "Exception"
 ioGroup = io "IO"
 stmGroup = stm "STM"
 concGroup = conc "Concurrent"
@@ -187,50 +185,20 @@ stgGroup = stg "Stg"
 parGroup = par "Parallel"
 interpGroup = interp "Interpreter"
 
-mkRtsFunCall :: (Text, Text) -> Code
-mkRtsFunCall (group, name) =
-     getstatic (mkFieldRef group name rtsFunType)
-  <> loadContext
-  <> invokevirtual (mkMethodRef rtsFun "enter" [contextType] void)
-
 -- Types
-buffer :: Text
-buffer = "java/nio/Buffer"
-
-bufferType :: FieldType
-bufferType = obj buffer
-
-byteBuffer :: Text
-byteBuffer = "java/nio/ByteBuffer"
-
-byteBufferType :: FieldType
-byteBufferType = obj byteBuffer
-
 byteArrayBuf :: Code
-byteArrayBuf = getfield $ mkFieldRef stgByteArray "buf" byteBufferType
+byteArrayBuf = getfield $ mkFieldRef stgByteArray "bufferAddress" jlong
 
-byteBufferCapacity :: Code
-byteBufferCapacity = invokevirtual $ mkMethodRef byteBuffer "capacity" [] (ret jint)
+byteArraySize :: Code
+byteArraySize = getfield $ mkFieldRef stgByteArray "size" jint
 
-byteBufferGet :: FieldType -> Code
-byteBufferGet ft = invokevirtual $ mkMethodRef byteBuffer name [jint] (ret ft)
-  where name = append "get" $ fieldTypeSuffix ft
+addressGet :: FieldType -> Code
+addressGet ft = invokestatic $ mkMethodRef memoryManager name [jlong] (ret ft)
+  where name = T.append "get" $ fieldTypeSuffix ft
 
-byteBufferPut :: FieldType -> Code
-byteBufferPut ft = invokevirtual $ mkMethodRef byteBuffer name [jint, ft] (ret byteBufferType)
-  where name = append "put" $ fieldTypeSuffix ft
-
-byteBufferPosGet :: Code
-byteBufferPosGet = invokevirtual $ mkMethodRef byteBuffer "position" [] (ret jint)
-
-byteBufferAddrGet :: Code
-byteBufferAddrGet = invokestatic $ mkMethodRef memoryManager "getAddress" [byteBufferType] (ret jint)
-
-byteBufferPosSet :: Code
-byteBufferPosSet = invokevirtual $ mkMethodRef byteBuffer "position" [jint] (ret bufferType)
-
-byteBufferDup :: Code
-byteBufferDup = invokevirtual $ mkMethodRef byteBuffer "duplicate" [] (ret byteBufferType)
+addressPut :: FieldType -> Code
+addressPut ft = invokestatic $ mkMethodRef memoryManager name [jlong, ft] void
+  where name = T.append "put" $ fieldTypeSuffix ft
 
 fieldTypeSuffix :: FieldType -> Text
 fieldTypeSuffix (BaseType prim) =
@@ -249,7 +217,7 @@ mutVarValue :: Code
 mutVarValue = getfield $ mkFieldRef stgMutVar "value" closureType
 
 mutVarSetValue :: Code
-mutVarSetValue = putfield $ mkFieldRef stgMutVar "value" closureType
+mutVarSetValue = invokevirtual $ mkMethodRef stgMutVar "set" [closureType] void
 
 mVarValue :: Code
 mVarValue = getfield $ mkFieldRef stgMVar "value" closureType
@@ -258,7 +226,7 @@ barf :: Text -> Code
 barf text = sconst text
          <> iconst jint (0)
          <> new arrayFt
-         <> invokestatic (mkMethodRef (rts "RtsMessages") "barf" [jstring, arrayFt] void)
+         <> invokestatic (mkMethodRef (rts "RuntimeLogging") "barf" [jstring, arrayFt] void)
   where arrayFt = jarray jobject
 
 hsResultCap :: Code
@@ -268,10 +236,10 @@ hsResultValue :: Code
 hsResultValue = getfield $ mkFieldRef hsResult "result" closureType
 
 trueClosure :: Code
-trueClosure = invokestatic . mkMethodRef "ghc_prim/ghc/Types" "DTrue_closure" [] $ Just closureType
+trueClosure = invokestatic . mkMethodRef "ghc_prim/ghc/Types" "DTrue" [] $ Just closureType
 
 falseClosure :: Code
-falseClosure = invokestatic . mkMethodRef "ghc_prim/ghc/Types" "DFalse_closure" [] $ Just closureType
+falseClosure = invokestatic . mkMethodRef "ghc_prim/ghc/Types" "DFalse" [] $ Just closureType
 
 getTagMethod :: Code -> Code
 getTagMethod code
@@ -294,5 +262,36 @@ debugPrint ft = dup ft
         genFt (ArrayType _)  = jobject
         genFt ft             = ft
 
-nullAddr :: Code
-nullAddr = getstatic $ mkFieldRef memoryManager "nullAddress" byteBufferType
+ftClassObject :: FieldType -> Code
+ftClassObject ft@(BaseType _) =
+  getstatic $ mkFieldRef (ftWrapper ft) "TYPE" classFt
+ftClassObject ft@(ObjectType iclassName) = gldc ft (CClass iclassName)
+ftClassObject ft@(ArrayType ft') = gldc ft (CClass . IClassName $ mkFieldDesc' ft')
+
+ftWrapper :: FieldType -> Text
+ftWrapper (BaseType prim) =
+  prefix <> case prim of
+    JBool   -> "Boolean"
+    JChar   -> "Character"
+    JFloat  -> "Float"
+    JDouble -> "Double"
+    JByte   -> "Byte"
+    JShort  -> "Short"
+    JInt    -> "Integer"
+    JLong   -> "Long"
+  where prefix = "java/lang/"
+ftWrapper ft = error $ "ftWrapper: Not a base type: " ++ show ft
+
+classType, methodType :: Text
+classType = "java/lang/Class"
+methodType = "java/lang/reflect/Method"
+
+classFt, methodFt :: FieldType
+classFt  = obj classType
+methodFt = obj methodType
+
+mkRecInitMethodName :: Int -> Text
+mkRecInitMethodName n = "$recInit" <> T.pack (show n)
+
+mkRecBindingMethodName :: Int -> Text
+mkRecBindingMethodName n = "$recBinding" <> T.pack (show n)

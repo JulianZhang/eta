@@ -6,17 +6,17 @@ import java.lang.reflect.Field;
 import java.security.AccessController;
 import java.security.PrivilegedAction;
 
-import eta.runtime.stg.StgClosure;
-import eta.runtime.stm.StgTVar;
-import eta.runtime.thunk.StgThunk;
-import eta.runtime.io.StgMutVar;
+import eta.runtime.stg.Closure;
+import eta.runtime.stm.TVar;
+import eta.runtime.thunk.Thunk;
+import eta.runtime.io.MutVar;
 
 public class UnsafeUtil {
 
     public static final Unsafe UNSAFE;
-    private static final long indirecteeOffset;
-    private static final long cvOffset;
-    private static final long valueOffset;
+    private static long indirecteeOffset = 0;
+    private static long cvOffset         = 0;
+    private static long valueOffset      = 0;
 
     static {
         Unsafe unsafe;
@@ -26,19 +26,17 @@ public class UnsafeUtil {
         } catch (RuntimeException e) {
             unsafe = null;
         }
-        if (unsafe == null) {
-            throw new RuntimeException("Incompatible JVM - sun.misc.Unsafe support is missing");
-        }
-
-        try {
-            indirecteeOffset = unsafe.objectFieldOffset
-                (StgThunk.class.getDeclaredField("indirectee"));
-            cvOffset = unsafe.objectFieldOffset
-                (StgTVar.class.getDeclaredField("currentValue"));
-            valueOffset = unsafe.objectFieldOffset
-                (StgMutVar.class.getDeclaredField("value"));
-        } catch (ReflectiveOperationException e) {
-            throw new IllegalStateException();
+        if (unsafe != null) {
+            try {
+                indirecteeOffset = unsafe.objectFieldOffset
+                    (Thunk.class.getDeclaredField("indirectee"));
+                cvOffset = unsafe.objectFieldOffset
+                    (TVar.class.getDeclaredField("currentValue"));
+                valueOffset = unsafe.objectFieldOffset
+                    (MutVar.class.getDeclaredField("value"));
+            } catch (ReflectiveOperationException e) {
+                unsafe = null;
+            }
         }
         UNSAFE = unsafe;
     }
@@ -76,15 +74,15 @@ public class UnsafeUtil {
 
     private UnsafeUtil() {}
 
-    public static boolean cas(StgThunk ind, StgClosure expected, StgClosure update) {
+    public static boolean cas(Thunk ind, Closure expected, Closure update) {
         return UNSAFE.compareAndSwapObject(ind, indirecteeOffset, expected, update);
     }
 
-    public static boolean cas(StgTVar tvar, StgClosure expected, StgClosure update) {
+    public static boolean cas(TVar tvar, Closure expected, Closure update) {
         return UNSAFE.compareAndSwapObject(tvar, cvOffset, expected, update);
     }
 
-    public static boolean cas(StgMutVar mv, StgClosure expected, StgClosure update) {
+    public static boolean cas(MutVar mv, Closure expected, Closure update) {
         return UNSAFE.compareAndSwapObject(mv, valueOffset, expected, update);
     }
 }
